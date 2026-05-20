@@ -1,0 +1,221 @@
+{
+  "name": "CRM - Client Onboarding Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "client-onboard",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "webhook-onboard",
+      "name": "Webhook - New Client",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.company_name }}",
+              "operation": "isNotEmpty"
+            },
+            {
+              "value1": "={{ $json.contact_email }}",
+              "operation": "isNotEmpty"
+            },
+            {
+              "value1": "={{ $json.client_code }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "validate-input",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const crypto = require('crypto');\nconst input = $input.first().json;\n\n// Generate API key dan webhook secret\nconst apiKey = 'gv_' + crypto.randomBytes(32).toString('hex');\nconst webhookSecret = crypto.randomBytes(24).toString('base64url');\n\n// Default config berdasarkan plan\nconst planConfigs = {\n  starter: {\n    max_contacts: 5000,\n    max_keywords: 100,\n    max_emails_per_month: 10000,\n    features: ['crm', 'email_basic']\n  },\n  standard: {\n    max_contacts: 25000,\n    max_keywords: 500,\n    max_emails_per_month: 50000,\n    features: ['crm', 'email', 'seo', 'reporting']\n  },\n  enterprise: {\n    max_contacts: 100000,\n    max_keywords: 2000,\n    max_emails_per_month: 200000,\n    features: ['crm', 'email', 'seo', 'reporting', 'competitor', 'ai']\n  }\n};\n\nconst plan = input.plan_type || 'standard';\nconst config = planConfigs[plan] || planConfigs.standard;\n\nreturn [{\n  json: {\n    ...input,\n    api_key: apiKey,\n    webhook_secret: webhookSecret,\n    plan_type: plan,\n    max_contacts: config.max_contacts,\n    max_keywords: config.max_keywords,\n    max_emails_per_month: config.max_emails_per_month,\n    config: {\n      features: config.features,\n      timezone: input.timezone || 'Asia/Jakarta',\n      notification_channel: input.slack_channel || null,\n      report_recipients: input.report_emails || [input.contact_email],\n      seo_domain: input.domain || null,\n      competitors: input.competitors || []\n    }\n  }\n}];"
+      },
+      "id": "generate-credentials",
+      "name": "Generate Credentials & Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 250]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO clients (client_code, company_name, domain, contact_email, contact_name, plan_type, status, config, api_key, webhook_secret, max_contacts, max_keywords, max_emails_per_month, onboarded_at) VALUES ('{{ $json.client_code }}', '{{ $json.company_name }}', '{{ $json.domain || '' }}', '{{ $json.contact_email }}', '{{ $json.contact_name || '' }}', '{{ $json.plan_type }}', 'onboarding', '{{ JSON.stringify($json.config) }}'::jsonb, '{{ $json.api_key }}', '{{ $json.webhook_secret }}', {{ $json.max_contacts }}, {{ $json.max_keywords }}, {{ $json.max_emails_per_month }}, NOW()) RETURNING *",
+        "options": {}
+      },
+      "id": "create-client",
+      "name": "Create Client Record",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 250],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT log_audit({{ $json.id }}, 'client-onboarding', 'client_created', 'client', {{ $json.id }}, '{\"plan\": \"{{ $json.plan_type }}\", \"company\": \"{{ $json.company_name }}\"}'::jsonb, 'success')",
+        "options": {}
+      },
+      "id": "log-onboarding",
+      "name": "Log Audit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 250],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const client = $input.first().json;\n\n// Setup default tracked keywords jika domain tersedia\nconst setupTasks = [];\n\nif (client.domain) {\n  setupTasks.push({\n    task: 'setup_site_health',\n    description: `Setup site health monitoring for ${client.domain}`\n  });\n}\n\nif (client.config?.competitors?.length > 0) {\n  setupTasks.push({\n    task: 'setup_competitors',\n    description: `Setup competitor tracking for ${client.config.competitors.length} competitors`\n  });\n}\n\nsetupTasks.push({\n  task: 'setup_notifications',\n  description: 'Configure notification channels'\n});\n\nsetupTasks.push({\n  task: 'send_welcome',\n  description: 'Send welcome email with API credentials'\n});\n\nreturn [{ json: { ...client, setup_tasks: setupTasks } }];"
+      },
+      "id": "plan-setup",
+      "name": "Plan Setup Tasks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1350, 250]
+    },
+    {
+      "parameters": {
+        "fromEmail": "onboarding@{{ $env.COMPANY_DOMAIN }}",
+        "toEmail": "={{ $json.contact_email }}",
+        "subject": "Welcome to GreeVo - Your API Credentials",
+        "contentType": "html",
+        "content": "<h2>Welcome to GreeVo, {{ $json.contact_name || $json.company_name }}!</h2><p>Your account has been set up successfully. Here are your credentials:</p><ul><li><strong>Client Code:</strong> {{ $json.client_code }}</li><li><strong>API Key:</strong> {{ $json.api_key }}</li><li><strong>Webhook Secret:</strong> {{ $json.webhook_secret }}</li><li><strong>Plan:</strong> {{ $json.plan_type }}</li></ul><h3>Webhook Endpoint</h3><p>Send contacts to: <code>POST {{ $env.N8N_HOST }}/webhook/contact-sync</code></p><p>Include header: <code>X-API-Key: YOUR_API_KEY</code></p><h3>Limits</h3><ul><li>Max Contacts: {{ $json.max_contacts }}</li><li>Max Keywords: {{ $json.max_keywords }}</li><li>Max Emails/Month: {{ $json.max_emails_per_month }}</li></ul><p>Our team will reach out shortly to complete the setup.</p>",
+        "options": {}
+      },
+      "id": "send-welcome-email",
+      "name": "Send Welcome Email",
+      "type": "n8n-nodes-base.sendGrid",
+      "typeVersion": 1,
+      "position": [1570, 250],
+      "credentials": {
+        "sendGridApi": {
+          "id": "sendgrid-cred",
+          "name": "SendGrid API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE clients SET status = 'active' WHERE id = {{ $json.id }}",
+        "options": {}
+      },
+      "id": "activate-client",
+      "name": "Activate Client",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1790, 250],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#client-onboarding",
+        "text": "🎉 *New Client Onboarded*\n\n*Company:* {{ $json.company_name }}\n*Code:* {{ $json.client_code }}\n*Plan:* {{ $json.plan_type }}\n*Contact:* {{ $json.contact_name }} ({{ $json.contact_email }})\n*Domain:* {{ $json.domain || 'Not set' }}\n\n*Setup Tasks:*\n{{ $json.setup_tasks.map(t => `• ${t.description}`).join('\\n') }}",
+        "options": {}
+      },
+      "id": "notify-team",
+      "name": "Notify Team",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1790, 400],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, client_id: $json.id, client_code: $json.client_code, api_key: $json.api_key, webhook_secret: $json.webhook_secret, message: 'Client onboarded successfully' }) }}"
+      },
+      "id": "response-success",
+      "name": "Response Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2010, 250]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: false, message: 'Missing required fields: company_name, contact_email, client_code' }) }}",
+        "options": { "responseCode": 400 }
+      },
+      "id": "response-error",
+      "name": "Response Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [690, 450]
+    }
+  ],
+  "connections": {
+    "Webhook - New Client": {
+      "main": [[{ "node": "Validate Input", "type": "main", "index": 0 }]]
+    },
+    "Validate Input": {
+      "main": [
+        [{ "node": "Generate Credentials & Config", "type": "main", "index": 0 }],
+        [{ "node": "Response Error", "type": "main", "index": 0 }]
+      ]
+    },
+    "Generate Credentials & Config": {
+      "main": [[{ "node": "Create Client Record", "type": "main", "index": 0 }]]
+    },
+    "Create Client Record": {
+      "main": [[{ "node": "Log Audit", "type": "main", "index": 0 }]]
+    },
+    "Log Audit": {
+      "main": [[{ "node": "Plan Setup Tasks", "type": "main", "index": 0 }]]
+    },
+    "Plan Setup Tasks": {
+      "main": [[{ "node": "Send Welcome Email", "type": "main", "index": 0 }]]
+    },
+    "Send Welcome Email": {
+      "main": [[
+        { "node": "Activate Client", "type": "main", "index": 0 },
+        { "node": "Notify Team", "type": "main", "index": 0 }
+      ]]
+    },
+    "Activate Client": {
+      "main": [[{ "node": "Response Success", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "CRM" },
+    { "name": "Onboarding" },
+    { "name": "Multi-Tenant" }
+  ]
+}

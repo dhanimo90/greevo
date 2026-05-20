@@ -1,0 +1,145 @@
+{
+  "name": "System - Rate Limiter & Queue Manager",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "rate-check",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "rate-check-webhook",
+      "name": "Rate Check Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const request = $input.first().json;\n\n// Validate required fields\nif (!request.client_id || !request.service_name) {\n  return [{ json: { allowed: false, error: 'Missing client_id or service_name' } }];\n}\n\n// Service-specific rate limits\nconst serviceLimits = {\n  ahrefs: { max_per_hour: 50, max_per_day: 500 },\n  hubspot: { max_per_hour: 1000, max_per_day: 10000 },\n  sendgrid: { max_per_hour: 500, max_per_day: 5000 },\n  google_api: { max_per_hour: 100, max_per_day: 1000 },\n  slack: { max_per_hour: 100, max_per_day: 2000 }\n};\n\nconst limits = serviceLimits[request.service_name] || { max_per_hour: 100, max_per_day: 1000 };\n\nreturn [{\n  json: {\n    client_id: request.client_id,\n    service_name: request.service_name,\n    max_per_hour: limits.max_per_hour,\n    max_per_day: limits.max_per_day,\n    action: request.action || 'check' // check or consume\n  }\n}];"
+      },
+      "id": "parse-request",
+      "name": "Parse Rate Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT check_rate_limit({{ $json.client_id }}, '{{ $json.service_name }}', {{ $json.max_per_hour }}, 3600) as allowed_hourly, (SELECT COALESCE(SUM(request_count), 0) FROM rate_limits WHERE client_id = {{ $json.client_id }} AND service_name = '{{ $json.service_name }}' AND window_start > NOW() - INTERVAL '24 hours') as daily_usage",
+        "options": {}
+      },
+      "id": "check-rate",
+      "name": "Check Rate Limit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const rateResult = $input.first().json;\nconst request = $node['Parse Rate Request'].json;\n\nconst hourlyAllowed = rateResult.allowed_hourly === true;\nconst dailyUsage = parseInt(rateResult.daily_usage) || 0;\nconst dailyAllowed = dailyUsage < request.max_per_day;\n\nconst allowed = hourlyAllowed && dailyAllowed;\n\nlet retryAfter = null;\nif (!hourlyAllowed) {\n  // Calculate seconds until next hour window\n  const now = new Date();\n  const nextHour = new Date(now);\n  nextHour.setHours(nextHour.getHours() + 1, 0, 0, 0);\n  retryAfter = Math.ceil((nextHour - now) / 1000);\n}\n\nreturn [{\n  json: {\n    allowed: allowed,\n    client_id: request.client_id,\n    service_name: request.service_name,\n    hourly_allowed: hourlyAllowed,\n    daily_allowed: dailyAllowed,\n    daily_usage: dailyUsage,\n    daily_limit: request.max_per_day,\n    hourly_limit: request.max_per_hour,\n    retry_after_seconds: retryAfter,\n    remaining_daily: Math.max(0, request.max_per_day - dailyUsage)\n  }\n}];"
+      },
+      "id": "evaluate-rate",
+      "name": "Evaluate Rate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.allowed }}",
+              "value2": false
+            }
+          ]
+        }
+      },
+      "id": "is-limited",
+      "name": "Rate Limited?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1130, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT log_audit({{ $json.client_id }}, 'rate-limiter', 'rate_limit_hit', 'system', NULL, '{\"service\": \"{{ $json.service_name }}\", \"daily_usage\": {{ $json.daily_usage }}, \"daily_limit\": {{ $json.daily_limit }}}'::jsonb, 'warning')",
+        "options": {}
+      },
+      "id": "log-rate-limit",
+      "name": "Log Rate Limit Hit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1350, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ allowed: false, reason: 'Rate limit exceeded', service: $json.service_name, retry_after_seconds: $json.retry_after_seconds, daily_usage: $json.daily_usage, daily_limit: $json.daily_limit }) }}",
+        "options": { "responseCode": 429 }
+      },
+      "id": "response-limited",
+      "name": "Response: Rate Limited",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1570, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ allowed: true, service: $json.service_name, remaining_daily: $json.remaining_daily, daily_usage: $json.daily_usage, daily_limit: $json.daily_limit }) }}"
+      },
+      "id": "response-allowed",
+      "name": "Response: Allowed",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1350, 400]
+    }
+  ],
+  "connections": {
+    "Rate Check Webhook": {
+      "main": [[{ "node": "Parse Rate Request", "type": "main", "index": 0 }]]
+    },
+    "Parse Rate Request": {
+      "main": [[{ "node": "Check Rate Limit", "type": "main", "index": 0 }]]
+    },
+    "Check Rate Limit": {
+      "main": [[{ "node": "Evaluate Rate", "type": "main", "index": 0 }]]
+    },
+    "Evaluate Rate": {
+      "main": [[{ "node": "Rate Limited?", "type": "main", "index": 0 }]]
+    },
+    "Rate Limited?": {
+      "main": [
+        [{ "node": "Log Rate Limit Hit", "type": "main", "index": 0 }],
+        [{ "node": "Response: Allowed", "type": "main", "index": 0 }]
+      ]
+    },
+    "Log Rate Limit Hit": {
+      "main": [[{ "node": "Response: Rate Limited", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "System" },
+    { "name": "Rate Limiting" },
+    { "name": "Infrastructure" }
+  ]
+}

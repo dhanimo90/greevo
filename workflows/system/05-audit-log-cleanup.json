@@ -1,0 +1,170 @@
+{
+  "name": "System - Audit Log & Data Cleanup",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 3 * * 0" }]
+        }
+      },
+      "id": "weekly-sunday-3am",
+      "name": "Sunday 3 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT (SELECT COUNT(*) FROM audit_logs) as total_audit_logs, (SELECT COUNT(*) FROM audit_logs WHERE created_at < NOW() - INTERVAL '90 days') as old_audit_logs, (SELECT COUNT(*) FROM workflow_execution_stats) as total_exec_stats, (SELECT COUNT(*) FROM workflow_execution_stats WHERE started_at < NOW() - INTERVAL '30 days') as old_exec_stats, (SELECT COUNT(*) FROM rate_limits WHERE window_start < NOW() - INTERVAL '24 hours') as expired_rate_limits, (SELECT COUNT(*) FROM system_health WHERE checked_at < NOW() - INTERVAL '7 days') as old_health_checks, (SELECT COUNT(*) FROM keyword_rankings WHERE checked_at < NOW() - INTERVAL '365 days') as old_rankings, (SELECT pg_database_size('greevo')) as db_size_bytes",
+        "options": {}
+      },
+      "id": "assess-data",
+      "name": "Assess Data Volume",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const stats = $input.first().json;\n\nconst cleanupTasks = [];\n\n// Audit logs older than 90 days\nif (stats.old_audit_logs > 0) {\n  cleanupTasks.push({\n    table: 'audit_logs',\n    condition: \"created_at < NOW() - INTERVAL '90 days'\",\n    estimated_rows: stats.old_audit_logs,\n    description: 'Remove audit logs older than 90 days'\n  });\n}\n\n// Execution stats older than 30 days\nif (stats.old_exec_stats > 0) {\n  cleanupTasks.push({\n    table: 'workflow_execution_stats',\n    condition: \"started_at < NOW() - INTERVAL '30 days' AND status = 'success'\",\n    estimated_rows: stats.old_exec_stats,\n    description: 'Remove successful execution stats older than 30 days'\n  });\n}\n\n// Expired rate limits\nif (stats.expired_rate_limits > 0) {\n  cleanupTasks.push({\n    table: 'rate_limits',\n    condition: \"window_start < NOW() - INTERVAL '24 hours'\",\n    estimated_rows: stats.expired_rate_limits,\n    description: 'Remove expired rate limit windows'\n  });\n}\n\n// Old health checks\nif (stats.old_health_checks > 0) {\n  cleanupTasks.push({\n    table: 'system_health',\n    condition: \"checked_at < NOW() - INTERVAL '7 days'\",\n    estimated_rows: stats.old_health_checks,\n    description: 'Remove health checks older than 7 days'\n  });\n}\n\n// Old keyword rankings (keep 1 year)\nif (stats.old_rankings > 0) {\n  cleanupTasks.push({\n    table: 'keyword_rankings',\n    condition: \"checked_at < NOW() - INTERVAL '365 days'\",\n    estimated_rows: stats.old_rankings,\n    description: 'Remove keyword rankings older than 1 year'\n  });\n}\n\nreturn [{\n  json: {\n    db_size_mb: Math.round(stats.db_size_bytes / 1024 / 1024),\n    total_audit_logs: stats.total_audit_logs,\n    total_exec_stats: stats.total_exec_stats,\n    cleanup_tasks: cleanupTasks,\n    total_rows_to_clean: cleanupTasks.reduce((sum, t) => sum + t.estimated_rows, 0)\n  }\n}];"
+      },
+      "id": "plan-cleanup",
+      "name": "Plan Cleanup",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.total_rows_to_clean }}",
+              "operation": "larger",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "id": "has-cleanup",
+      "name": "Has Cleanup Work?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.cleanup_tasks.map(t => `DELETE FROM ${t.table} WHERE ${t.condition}`).join('; ') }}; VACUUM ANALYZE;",
+        "options": { "timeout": 300000 }
+      },
+      "id": "execute-cleanup",
+      "name": "Execute Cleanup",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 250],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT pg_database_size('greevo') as db_size_after",
+        "options": {}
+      },
+      "id": "check-size-after",
+      "name": "Check Size After",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1350, 250],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT log_audit(NULL, 'audit-cleanup', 'data_cleanup_completed', 'system', NULL, '{{ JSON.stringify({rows_cleaned: $node[\"Plan Cleanup\"].json.total_rows_to_clean, db_size_before_mb: $node[\"Plan Cleanup\"].json.db_size_mb, tasks: $node[\"Plan Cleanup\"].json.cleanup_tasks.length}) }}'::jsonb, 'success')",
+        "options": {}
+      },
+      "id": "log-cleanup",
+      "name": "Log Cleanup",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1570, 250],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#system-maintenance",
+        "text": "🧹 *Weekly Data Cleanup Complete*\n\n*DB Size Before:* {{ $node['Plan Cleanup'].json.db_size_mb }} MB\n*Rows Cleaned:* {{ $node['Plan Cleanup'].json.total_rows_to_clean.toLocaleString() }}\n\n*Tasks Performed:*\n{{ $node['Plan Cleanup'].json.cleanup_tasks.map(t => `• ${t.description} (~${t.estimated_rows.toLocaleString()} rows)`).join('\\n') }}\n\n✅ VACUUM ANALYZE completed",
+        "options": {}
+      },
+      "id": "notify-cleanup",
+      "name": "Notify Cleanup Done",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1790, 250],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Sunday 3 AM": {
+      "main": [[{ "node": "Assess Data Volume", "type": "main", "index": 0 }]]
+    },
+    "Assess Data Volume": {
+      "main": [[{ "node": "Plan Cleanup", "type": "main", "index": 0 }]]
+    },
+    "Plan Cleanup": {
+      "main": [[{ "node": "Has Cleanup Work?", "type": "main", "index": 0 }]]
+    },
+    "Has Cleanup Work?": {
+      "main": [
+        [{ "node": "Execute Cleanup", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Execute Cleanup": {
+      "main": [[{ "node": "Check Size After", "type": "main", "index": 0 }]]
+    },
+    "Check Size After": {
+      "main": [[{ "node": "Log Cleanup", "type": "main", "index": 0 }]]
+    },
+    "Log Cleanup": {
+      "main": [[{ "node": "Notify Cleanup Done", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "System" },
+    { "name": "Maintenance" },
+    { "name": "Cleanup" }
+  ]
+}

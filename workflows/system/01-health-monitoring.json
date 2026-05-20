@@ -1,0 +1,186 @@
+{
+  "name": "System - Health Monitoring",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 5 }]
+        }
+      },
+      "id": "every-5-min",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT 1 as healthy, NOW() as server_time, pg_database_size('greevo') as db_size_bytes, (SELECT count(*) FROM pg_stat_activity WHERE state = 'active') as active_connections, (SELECT count(*) FROM pg_stat_activity) as total_connections",
+        "options": {}
+      },
+      "id": "check-postgres",
+      "name": "Check PostgreSQL",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 150],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "http://redis:6379",
+        "method": "GET",
+        "options": { "timeout": 5000 }
+      },
+      "id": "check-redis-raw",
+      "name": "Check Redis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [470, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:5678/healthz",
+        "method": "GET",
+        "options": { "timeout": 5000 }
+      },
+      "id": "check-n8n",
+      "name": "Check n8n API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [470, 450],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "functionCode": "const pgResult = $node['Check PostgreSQL'].json;\nconst redisResult = $node['Check Redis'].json;\nconst n8nResult = $node['Check n8n API'].json;\n\nconst checks = [];\nlet overallStatus = 'healthy';\n\n// PostgreSQL check\nconst pgHealthy = pgResult?.healthy === 1;\nchecks.push({\n  component: 'postgres',\n  status: pgHealthy ? 'healthy' : 'down',\n  details: pgHealthy ? {\n    db_size_mb: Math.round((pgResult.db_size_bytes || 0) / 1024 / 1024),\n    active_connections: pgResult.active_connections || 0,\n    total_connections: pgResult.total_connections || 0\n  } : { error: 'Connection failed' }\n});\nif (!pgHealthy) overallStatus = 'down';\n\n// Redis check\nconst redisHealthy = !redisResult?.error;\nchecks.push({\n  component: 'redis',\n  status: redisHealthy ? 'healthy' : 'degraded',\n  details: redisHealthy ? { connected: true } : { error: 'Connection failed' }\n});\nif (!redisHealthy && overallStatus === 'healthy') overallStatus = 'degraded';\n\n// n8n check\nconst n8nHealthy = n8nResult?.status === 'ok' || n8nResult?.statusCode === 200 || !n8nResult?.error;\nchecks.push({\n  component: 'n8n',\n  status: n8nHealthy ? 'healthy' : 'down',\n  details: n8nHealthy ? { responsive: true } : { error: 'API not responding' }\n});\nif (!n8nHealthy) overallStatus = 'down';\n\n// Disk/memory estimates\nconst memUsage = process.memoryUsage();\nchecks.push({\n  component: 'n8n_memory',\n  status: memUsage.heapUsed / memUsage.heapTotal > 0.9 ? 'degraded' : 'healthy',\n  details: {\n    heap_used_mb: Math.round(memUsage.heapUsed / 1024 / 1024),\n    heap_total_mb: Math.round(memUsage.heapTotal / 1024 / 1024),\n    usage_percent: Math.round(memUsage.heapUsed / memUsage.heapTotal * 100)\n  }\n});\n\nreturn [{\n  json: {\n    overall_status: overallStatus,\n    checks: checks,\n    checked_at: new Date().toISOString(),\n    has_critical: overallStatus === 'down'\n  }\n}];"
+      },
+      "id": "evaluate-health",
+      "name": "Evaluate Health",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.checks.map(c => `INSERT INTO system_health (component, status, response_time_ms, details) VALUES ('${c.component}', '${c.status}', 0, '${JSON.stringify(c.details)}'::jsonb)`).join('; ') }}",
+        "options": {}
+      },
+      "id": "save-health",
+      "name": "Save Health Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.has_critical }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "is-critical",
+      "name": "Is Critical?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1130, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#system-alerts",
+        "text": "🚨 *SYSTEM HEALTH CRITICAL*\n\n*Overall Status:* {{ $json.overall_status }}\n*Time:* {{ $json.checked_at }}\n\n*Component Status:*\n{{ $json.checks.map(c => `• *${c.component}*: ${c.status === 'healthy' ? '✅' : c.status === 'degraded' ? '⚠️' : '❌'} ${c.status}`).join('\\n') }}\n\n*Details:*\n{{ $json.checks.filter(c => c.status !== 'healthy').map(c => `• ${c.component}: ${JSON.stringify(c.details)}`).join('\\n') }}\n\n⚡ Immediate investigation required!",
+        "options": {}
+      },
+      "id": "alert-critical",
+      "name": "Alert Critical",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1350, 200],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT log_audit(NULL, 'health-monitoring', 'system_health_check', 'system', NULL, '{{ JSON.stringify({overall: $json.overall_status, components: $json.checks.length}) }}'::jsonb, '{{ $json.has_critical ? 'error' : 'success' }}')",
+        "options": {}
+      },
+      "id": "log-health-check",
+      "name": "Log Health Check",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1350, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      },
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Every 5 Minutes": {
+      "main": [[
+        { "node": "Check PostgreSQL", "type": "main", "index": 0 },
+        { "node": "Check Redis", "type": "main", "index": 0 },
+        { "node": "Check n8n API", "type": "main", "index": 0 }
+      ]]
+    },
+    "Check PostgreSQL": {
+      "main": [[{ "node": "Evaluate Health", "type": "main", "index": 0 }]]
+    },
+    "Check Redis": {
+      "main": [[{ "node": "Evaluate Health", "type": "main", "index": 0 }]]
+    },
+    "Check n8n API": {
+      "main": [[{ "node": "Evaluate Health", "type": "main", "index": 0 }]]
+    },
+    "Evaluate Health": {
+      "main": [[{ "node": "Save Health Status", "type": "main", "index": 0 }]]
+    },
+    "Save Health Status": {
+      "main": [[{ "node": "Is Critical?", "type": "main", "index": 0 }]]
+    },
+    "Is Critical?": {
+      "main": [
+        [{ "node": "Alert Critical", "type": "main", "index": 0 }],
+        [{ "node": "Log Health Check", "type": "main", "index": 0 }]
+      ]
+    },
+    "Alert Critical": {
+      "main": [[{ "node": "Log Health Check", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "System" },
+    { "name": "Health" },
+    { "name": "Monitoring" }
+  ]
+}

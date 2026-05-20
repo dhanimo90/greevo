@@ -1,0 +1,183 @@
+{
+  "name": "System - Backup & Restore Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 1 * * *" }]
+        }
+      },
+      "id": "daily-1am",
+      "name": "Daily 1 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const now = new Date();\nconst dateStr = now.toISOString().split('T')[0].replace(/-/g, '');\nconst dayOfWeek = now.getDay();\nconst dayOfMonth = now.getDate();\n\n// Determine backup type\nlet backupType = 'incremental';\nif (dayOfMonth === 1) {\n  backupType = 'full';\n} else if (dayOfWeek === 0) { // Sunday\n  backupType = 'full';\n}\n\nconst backupDir = '/backups';\nconst filename = `greevo_${backupType}_${dateStr}.sql.gz`;\nconst filepath = `${backupDir}/${filename}`;\n\n// Tables to backup\nconst allTables = [\n  'clients', 'client_credentials', 'contacts', 'lead_activities',\n  'email_campaigns', 'deals', 'tracked_keywords', 'keyword_rankings',\n  'backlinks', 'site_health_checks', 'competitor_tracking',\n  'analytics_snapshots', 'report_schedules', 'audit_logs',\n  'workflow_execution_stats', 'rate_limits'\n];\n\n// Incremental: only tables with recent changes\nconst incrementalTables = [\n  'contacts', 'lead_activities', 'deals', 'keyword_rankings',\n  'backlinks', 'site_health_checks', 'competitor_tracking',\n  'analytics_snapshots', 'audit_logs', 'workflow_execution_stats'\n];\n\nconst tables = backupType === 'full' ? allTables : incrementalTables;\n\nreturn [{\n  json: {\n    backup_type: backupType,\n    filename: filename,\n    filepath: filepath,\n    backup_dir: backupDir,\n    date_str: dateStr,\n    tables: tables,\n    retention_days: backupType === 'full' ? 30 : 7,\n    started_at: now.toISOString()\n  }\n}];"
+      },
+      "id": "plan-backup",
+      "name": "Plan Backup",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "command": "pg_dump -h postgres -U {{ $env.POSTGRES_USER || 'greevo' }} -d {{ $env.POSTGRES_DB || 'greevo' }} {{ $json.tables.map(t => '-t ' + t).join(' ') }} --no-owner --no-privileges | gzip > {{ $json.filepath }}",
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "id": "run-backup",
+      "name": "Run pg_dump",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [690, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "command": "ls -la {{ $json.filepath }} 2>/dev/null && echo 'EXISTS' || echo 'MISSING'",
+        "options": {}
+      },
+      "id": "verify-backup",
+      "name": "Verify Backup File",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [910, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "functionCode": "const output = $input.first().json;\nconst planData = $node['Plan Backup'].json;\nconst backupOutput = output.stdout || '';\nconst success = backupOutput.includes('EXISTS');\n\n// Parse file size if available\nlet fileSizeBytes = 0;\nif (success) {\n  const match = backupOutput.match(/(\\d+)\\s/);\n  if (match) fileSizeBytes = parseInt(match[1]);\n}\n\nconst expiresAt = new Date();\nexpiresAt.setDate(expiresAt.getDate() + planData.retention_days);\n\nreturn [{\n  json: {\n    ...planData,\n    success: success,\n    file_size_bytes: fileSizeBytes,\n    file_size_mb: Math.round(fileSizeBytes / 1024 / 1024 * 100) / 100,\n    expires_at: expiresAt.toISOString(),\n    completed_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "evaluate-backup",
+      "name": "Evaluate Result",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1130, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO backup_registry (backup_type, file_path, file_size_bytes, status, tables_included, started_at, completed_at, retention_days, expires_at) VALUES ('{{ $json.backup_type }}', '{{ $json.filepath }}', {{ $json.file_size_bytes }}, '{{ $json.success ? 'completed' : 'failed' }}', ARRAY[{{ $json.tables.map(t => \"'\" + t + \"'\").join(',') }}], '{{ $json.started_at }}', '{{ $json.completed_at }}', {{ $json.retention_days }}, '{{ $json.expires_at }}')",
+        "options": {}
+      },
+      "id": "register-backup",
+      "name": "Register Backup",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1350, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.success }}",
+              "value2": false
+            }
+          ]
+        }
+      },
+      "id": "backup-failed",
+      "name": "Backup Failed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1570, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#system-alerts",
+        "text": "❌ *BACKUP FAILED*\n\n*Type:* {{ $json.backup_type }}\n*File:* {{ $json.filename }}\n*Tables:* {{ $json.tables.length }}\n*Time:* {{ $json.started_at }}\n\n⚠️ Manual backup required!",
+        "options": {}
+      },
+      "id": "alert-backup-failed",
+      "name": "Alert Backup Failed",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1790, 200],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "command": "find {{ $json.backup_dir }} -name 'greevo_*.sql.gz' -mtime +{{ $json.retention_days }} -delete 2>/dev/null; echo 'Cleanup done'",
+        "options": {}
+      },
+      "id": "cleanup-old",
+      "name": "Cleanup Old Backups",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [1790, 400],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "DELETE FROM backup_registry WHERE expires_at < NOW() AND status = 'completed'",
+        "options": {}
+      },
+      "id": "cleanup-registry",
+      "name": "Cleanup Registry",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [2010, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 1 AM": {
+      "main": [[{ "node": "Plan Backup", "type": "main", "index": 0 }]]
+    },
+    "Plan Backup": {
+      "main": [[{ "node": "Run pg_dump", "type": "main", "index": 0 }]]
+    },
+    "Run pg_dump": {
+      "main": [[{ "node": "Verify Backup File", "type": "main", "index": 0 }]]
+    },
+    "Verify Backup File": {
+      "main": [[{ "node": "Evaluate Result", "type": "main", "index": 0 }]]
+    },
+    "Evaluate Result": {
+      "main": [[{ "node": "Register Backup", "type": "main", "index": 0 }]]
+    },
+    "Register Backup": {
+      "main": [[{ "node": "Backup Failed?", "type": "main", "index": 0 }]]
+    },
+    "Backup Failed?": {
+      "main": [
+        [{ "node": "Alert Backup Failed", "type": "main", "index": 0 }],
+        [{ "node": "Cleanup Old Backups", "type": "main", "index": 0 }]
+      ]
+    },
+    "Cleanup Old Backups": {
+      "main": [[{ "node": "Cleanup Registry", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "System" },
+    { "name": "Backup" },
+    { "name": "Maintenance" }
+  ]
+}

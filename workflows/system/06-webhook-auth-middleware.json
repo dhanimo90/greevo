@@ -1,0 +1,203 @@
+{
+  "name": "System - Webhook Authentication Middleware",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "v2/contact-sync",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "webhook-v2",
+      "name": "Webhook v2 - Contact Sync",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const request = $input.first().json;\nconst headers = $input.first().json.headers || {};\n\n// Extract API key from header\nconst apiKey = headers['x-api-key'] || headers['X-API-Key'] || headers['authorization']?.replace('Bearer ', '');\n\nif (!apiKey) {\n  return [{ json: { authenticated: false, error: 'Missing API key. Include X-API-Key header.' } }];\n}\n\nreturn [{ json: { ...request, api_key: apiKey, authenticated: null } }];"
+      },
+      "id": "extract-auth",
+      "name": "Extract Auth",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.id as client_id, c.client_code, c.company_name, c.status, c.plan_type, c.max_contacts, c.config, (SELECT COUNT(*) FROM contacts WHERE client_id = c.id) as current_contacts FROM clients c WHERE c.api_key = '{{ $json.api_key }}' AND c.status = 'active' LIMIT 1",
+        "options": {}
+      },
+      "id": "verify-api-key",
+      "name": "Verify API Key",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.client_id }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "is-valid-client",
+      "name": "Valid Client?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const client = $input.first().json;\nconst originalRequest = $node['Webhook v2 - Contact Sync'].json;\n\n// Check contact limit\nif (client.current_contacts >= client.max_contacts) {\n  return [{ json: { \n    authenticated: true, \n    authorized: false, \n    error: `Contact limit reached (${client.current_contacts}/${client.max_contacts})`,\n    client_id: client.client_id\n  }}];\n}\n\n// Merge client context with request data\nreturn [{ json: {\n  authenticated: true,\n  authorized: true,\n  client_id: client.client_id,\n  client_code: client.client_code,\n  company_name: client.company_name,\n  plan_type: client.plan_type,\n  // Original contact data\n  email: originalRequest.body?.email || originalRequest.email,\n  first_name: originalRequest.body?.first_name || originalRequest.first_name,\n  last_name: originalRequest.body?.last_name || originalRequest.last_name,\n  company: originalRequest.body?.company || originalRequest.company,\n  phone: originalRequest.body?.phone || originalRequest.phone,\n  job_title: originalRequest.body?.job_title || originalRequest.job_title,\n  source: originalRequest.body?.source || originalRequest.source || 'api',\n  tags: originalRequest.body?.tags || originalRequest.tags || [],\n  custom_fields: originalRequest.body?.custom_fields || originalRequest.custom_fields || {}\n}}];"
+      },
+      "id": "authorize-request",
+      "name": "Authorize & Enrich",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1130, 250]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.authorized }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "is-authorized",
+      "name": "Authorized?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1350, 250]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO contacts (email, first_name, last_name, company, phone, job_title, source, tags, custom_fields, client_id) VALUES ('{{ $json.email }}', '{{ $json.first_name || '' }}', '{{ $json.last_name || '' }}', '{{ $json.company || '' }}', '{{ $json.phone || '' }}', '{{ $json.job_title || '' }}', '{{ $json.source }}', ARRAY[{{ ($json.tags || []).map(t => \"'\" + t + \"'\").join(',') }}], '{{ JSON.stringify($json.custom_fields || {}) }}'::jsonb, {{ $json.client_id }}) ON CONFLICT (email) DO UPDATE SET first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name, company = EXCLUDED.company, phone = EXCLUDED.phone, client_id = EXCLUDED.client_id, updated_at = NOW() RETURNING *",
+        "options": {}
+      },
+      "id": "upsert-contact",
+      "name": "Upsert Contact",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1570, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT log_audit({{ $json.client_id }}, 'contact-sync-v2', 'contact_synced', 'contact', {{ $json.id }}, '{\"email\": \"{{ $json.email }}\", \"source\": \"{{ $json.source }}\"}'::jsonb, 'success')",
+        "options": {}
+      },
+      "id": "log-success",
+      "name": "Log Success",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1790, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, contact_id: $json.id, message: 'Contact synced' }) }}"
+      },
+      "id": "response-ok",
+      "name": "Response: OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2010, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: false, error: 'Invalid or missing API key' }) }}",
+        "options": { "responseCode": 401 }
+      },
+      "id": "response-401",
+      "name": "Response: Unauthorized",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1130, 450]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: false, error: $json.error || 'Forbidden' }) }}",
+        "options": { "responseCode": 403 }
+      },
+      "id": "response-403",
+      "name": "Response: Forbidden",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1570, 350]
+    }
+  ],
+  "connections": {
+    "Webhook v2 - Contact Sync": {
+      "main": [[{ "node": "Extract Auth", "type": "main", "index": 0 }]]
+    },
+    "Extract Auth": {
+      "main": [[{ "node": "Verify API Key", "type": "main", "index": 0 }]]
+    },
+    "Verify API Key": {
+      "main": [[{ "node": "Valid Client?", "type": "main", "index": 0 }]]
+    },
+    "Valid Client?": {
+      "main": [
+        [{ "node": "Authorize & Enrich", "type": "main", "index": 0 }],
+        [{ "node": "Response: Unauthorized", "type": "main", "index": 0 }]
+      ]
+    },
+    "Authorize & Enrich": {
+      "main": [[{ "node": "Authorized?", "type": "main", "index": 0 }]]
+    },
+    "Authorized?": {
+      "main": [
+        [{ "node": "Upsert Contact", "type": "main", "index": 0 }],
+        [{ "node": "Response: Forbidden", "type": "main", "index": 0 }]
+      ]
+    },
+    "Upsert Contact": {
+      "main": [[{ "node": "Log Success", "type": "main", "index": 0 }]]
+    },
+    "Log Success": {
+      "main": [[{ "node": "Response: OK", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "System" },
+    { "name": "Authentication" },
+    { "name": "Multi-Tenant" }
+  ]
+}

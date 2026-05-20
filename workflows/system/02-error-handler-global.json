@@ -1,0 +1,248 @@
+{
+  "name": "System - Global Error Handler & Retry",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "error-handler",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "error-webhook",
+      "name": "Error Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300],
+      "notes": "n8n Error Trigger - configure as error workflow in n8n settings"
+    },
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [250, 500]
+    },
+    {
+      "parameters": {
+        "functionCode": "const errorData = $input.first().json;\n\n// Parse error information\nconst execution = errorData.execution || {};\nconst workflow = errorData.workflow || {};\nconst error = execution.error || errorData.error || {};\n\nconst errorInfo = {\n  workflow_name: workflow.name || errorData.workflowName || 'Unknown',\n  workflow_id: workflow.id || errorData.workflowId || 'Unknown',\n  execution_id: execution.id || errorData.executionId || 'Unknown',\n  error_message: error.message || errorData.message || 'Unknown error',\n  error_node: error.node || errorData.nodeName || 'Unknown',\n  error_type: error.name || 'ExecutionError',\n  timestamp: new Date().toISOString(),\n  \n  // Determine severity\n  severity: determineSeverity(workflow.name, error.message),\n  \n  // Determine if retryable\n  is_retryable: isRetryable(error.message, error.name),\n  \n  // Extract client_id if available in execution data\n  client_id: extractClientId(execution)\n};\n\nfunction determineSeverity(workflowName, errorMsg) {\n  const criticalWorkflows = ['health-monitoring', 'contact-sync', 'hubspot-sync'];\n  const wfLower = (workflowName || '').toLowerCase();\n  \n  if (criticalWorkflows.some(cw => wfLower.includes(cw))) return 'critical';\n  if (errorMsg?.includes('timeout') || errorMsg?.includes('ECONNREFUSED')) return 'high';\n  if (errorMsg?.includes('rate limit') || errorMsg?.includes('429')) return 'medium';\n  return 'low';\n}\n\nfunction isRetryable(errorMsg, errorType) {\n  const retryablePatterns = [\n    'timeout', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT',\n    '429', '502', '503', '504', 'rate limit',\n    'temporarily unavailable', 'service unavailable'\n  ];\n  const msg = (errorMsg || '').toLowerCase();\n  return retryablePatterns.some(p => msg.includes(p.toLowerCase()));\n}\n\nfunction extractClientId(exec) {\n  try {\n    const data = exec.data || {};\n    const resultData = data.resultData || {};\n    const runData = resultData.runData || {};\n    // Try to find client_id in any node's output\n    for (const nodeName of Object.keys(runData)) {\n      const nodeRuns = runData[nodeName] || [];\n      for (const run of nodeRuns) {\n        const items = run.data?.main?.[0] || [];\n        for (const item of items) {\n          if (item.json?.client_id) return item.json.client_id;\n        }\n      }\n    }\n  } catch (e) {}\n  return null;\n}\n\nreturn [{ json: errorInfo }];"
+      },
+      "id": "parse-error",
+      "name": "Parse Error Info",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO workflow_execution_stats (client_id, workflow_name, execution_id, status, started_at, error_message, retry_count) VALUES ({{ $json.client_id || 'NULL' }}, '{{ $json.workflow_name }}', '{{ $json.execution_id }}', 'error', '{{ $json.timestamp }}', '{{ ($json.error_message || '').replace(/'/g, \"''\") }}', 0); SELECT log_audit({{ $json.client_id || 'NULL' }}, '{{ $json.workflow_name }}', 'error_occurred', 'workflow', NULL, '{{ JSON.stringify({node: $json.error_node, type: $json.error_type, severity: $json.severity, retryable: $json.is_retryable}) }}'::jsonb, 'error', '{{ ($json.error_message || '').replace(/'/g, \"''\") }}')",
+        "options": {}
+      },
+      "id": "log-error",
+      "name": "Log Error to DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.severity }}",
+              "operation": "equal",
+              "value2": "critical"
+            }
+          ]
+        }
+      },
+      "id": "is-critical-error",
+      "name": "Is Critical?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [910, 400]
+    },
+    {
+      "parameters": {
+        "channel": "#system-alerts",
+        "text": "🚨 *CRITICAL WORKFLOW ERROR*\n\n*Workflow:* {{ $json.workflow_name }}\n*Node:* {{ $json.error_node }}\n*Error:* {{ $json.error_message }}\n*Execution:* {{ $json.execution_id }}\n*Severity:* {{ $json.severity }}\n*Retryable:* {{ $json.is_retryable ? 'Yes ♻️' : 'No ❌' }}\n*Client:* {{ $json.client_id || 'System' }}\n*Time:* {{ $json.timestamp }}\n\n⚡ Immediate attention required!",
+        "options": {}
+      },
+      "id": "alert-critical-error",
+      "name": "Alert Critical Error",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1130, 300],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.severity }}",
+              "operation": "notEqual",
+              "value2": "low"
+            }
+          ]
+        }
+      },
+      "id": "notify-non-low",
+      "name": "Notify if Not Low?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [910, 550]
+    },
+    {
+      "parameters": {
+        "channel": "#workflow-errors",
+        "text": "⚠️ *Workflow Error*\n\n*Workflow:* {{ $json.workflow_name }}\n*Node:* {{ $json.error_node }}\n*Error:* {{ $json.error_message }}\n*Severity:* {{ $json.severity }}\n*Retryable:* {{ $json.is_retryable ? 'Yes' : 'No' }}",
+        "options": {}
+      },
+      "id": "notify-error",
+      "name": "Notify Error",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1130, 550],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.is_retryable }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "should-retry",
+      "name": "Should Retry?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1350, 400]
+    },
+    {
+      "parameters": {
+        "amount": 5,
+        "unit": "minutes"
+      },
+      "id": "wait-before-retry",
+      "name": "Wait 5 Min",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1570, 350]
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:5678/api/v1/executions/{{ $json.execution_id }}/retry",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": { "timeout": 10000 }
+      },
+      "id": "retry-execution",
+      "name": "Retry Execution",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1790, 350],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "n8n-api-cred",
+          "name": "n8n Internal API"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE workflow_execution_stats SET retry_count = retry_count + 1 WHERE execution_id = '{{ $json.execution_id }}'",
+        "options": {}
+      },
+      "id": "update-retry-count",
+      "name": "Update Retry Count",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [2010, 350],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      },
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Error Webhook": {
+      "main": [[{ "node": "Parse Error Info", "type": "main", "index": 0 }]]
+    },
+    "Error Trigger": {
+      "main": [[{ "node": "Parse Error Info", "type": "main", "index": 0 }]]
+    },
+    "Parse Error Info": {
+      "main": [[{ "node": "Log Error to DB", "type": "main", "index": 0 }]]
+    },
+    "Log Error to DB": {
+      "main": [[{ "node": "Is Critical?", "type": "main", "index": 0 }]]
+    },
+    "Is Critical?": {
+      "main": [
+        [{ "node": "Alert Critical Error", "type": "main", "index": 0 }],
+        [{ "node": "Notify if Not Low?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Alert Critical Error": {
+      "main": [[{ "node": "Should Retry?", "type": "main", "index": 0 }]]
+    },
+    "Notify if Not Low?": {
+      "main": [
+        [{ "node": "Notify Error", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Notify Error": {
+      "main": [[{ "node": "Should Retry?", "type": "main", "index": 0 }]]
+    },
+    "Should Retry?": {
+      "main": [
+        [{ "node": "Wait 5 Min", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Wait 5 Min": {
+      "main": [[{ "node": "Retry Execution", "type": "main", "index": 0 }]]
+    },
+    "Retry Execution": {
+      "main": [[{ "node": "Update Retry Count", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "System" },
+    { "name": "Error Handling" },
+    { "name": "Retry" }
+  ]
+}

@@ -1,0 +1,166 @@
+{
+  "name": "System - Client Usage Monitor & Alerts",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 8 * * *" }]
+        }
+      },
+      "id": "daily-8am",
+      "name": "Daily 8 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.id as client_id, c.client_code, c.company_name, c.plan_type, c.contact_email, c.max_contacts, c.max_keywords, c.max_emails_per_month, (SELECT COUNT(*) FROM contacts WHERE client_id = c.id) as contact_count, (SELECT COUNT(*) FROM tracked_keywords WHERE client_id = c.id AND is_active = true) as keyword_count, (SELECT COUNT(*) FROM audit_logs WHERE client_id = c.id AND action LIKE '%email_sent%' AND created_at > date_trunc('month', NOW())) as emails_this_month, (SELECT COUNT(*) FROM workflow_execution_stats WHERE client_id = c.id AND status = 'error' AND started_at > NOW() - INTERVAL '24 hours') as errors_24h, (SELECT MAX(created_at) FROM audit_logs WHERE client_id = c.id) as last_activity FROM clients c WHERE c.status = 'active' ORDER BY c.id",
+        "options": {}
+      },
+      "id": "get-all-clients",
+      "name": "Get All Client Usage",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const clients = $input.all().map(i => i.json);\nconst alerts = [];\nconst summary = {\n  total_clients: clients.length,\n  healthy: 0,\n  warning: 0,\n  critical: 0\n};\n\nfor (const client of clients) {\n  const contactUsage = client.contact_count / client.max_contacts;\n  const keywordUsage = client.keyword_count / client.max_keywords;\n  const emailUsage = client.emails_this_month / client.max_emails_per_month;\n  \n  let status = 'healthy';\n  const clientAlerts = [];\n\n  // Contact limit warnings\n  if (contactUsage >= 0.95) {\n    clientAlerts.push({ type: 'critical', message: `Contact limit at ${Math.round(contactUsage * 100)}% (${client.contact_count}/${client.max_contacts})` });\n    status = 'critical';\n  } else if (contactUsage >= 0.8) {\n    clientAlerts.push({ type: 'warning', message: `Contact usage at ${Math.round(contactUsage * 100)}%` });\n    if (status !== 'critical') status = 'warning';\n  }\n\n  // Keyword limit\n  if (keywordUsage >= 0.9) {\n    clientAlerts.push({ type: 'warning', message: `Keyword limit at ${Math.round(keywordUsage * 100)}%` });\n    if (status !== 'critical') status = 'warning';\n  }\n\n  // Email limit\n  if (emailUsage >= 0.9) {\n    clientAlerts.push({ type: 'critical', message: `Email limit at ${Math.round(emailUsage * 100)}% this month` });\n    status = 'critical';\n  } else if (emailUsage >= 0.7) {\n    clientAlerts.push({ type: 'warning', message: `Email usage at ${Math.round(emailUsage * 100)}% this month` });\n    if (status !== 'critical') status = 'warning';\n  }\n\n  // Error rate\n  if (client.errors_24h > 10) {\n    clientAlerts.push({ type: 'critical', message: `${client.errors_24h} errors in last 24h` });\n    status = 'critical';\n  } else if (client.errors_24h > 3) {\n    clientAlerts.push({ type: 'warning', message: `${client.errors_24h} errors in last 24h` });\n    if (status !== 'critical') status = 'warning';\n  }\n\n  // Inactivity check\n  if (client.last_activity) {\n    const daysSinceActivity = (Date.now() - new Date(client.last_activity).getTime()) / (1000 * 60 * 60 * 24);\n    if (daysSinceActivity > 7) {\n      clientAlerts.push({ type: 'info', message: `No activity for ${Math.round(daysSinceActivity)} days` });\n    }\n  }\n\n  summary[status]++;\n\n  if (clientAlerts.length > 0) {\n    alerts.push({\n      client_id: client.client_id,\n      client_code: client.client_code,\n      company_name: client.company_name,\n      contact_email: client.contact_email,\n      status: status,\n      alerts: clientAlerts,\n      usage: {\n        contacts: `${client.contact_count}/${client.max_contacts}`,\n        keywords: `${client.keyword_count}/${client.max_keywords}`,\n        emails: `${client.emails_this_month}/${client.max_emails_per_month}`\n      }\n    });\n  }\n}\n\nreturn [{ json: { summary, alerts, has_critical: summary.critical > 0 } }];"
+      },
+      "id": "analyze-usage",
+      "name": "Analyze Usage",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.alerts.length }}",
+              "operation": "larger",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "id": "has-alerts",
+      "name": "Has Alerts?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#client-health",
+        "text": "📊 *Daily Client Usage Report*\n\n*Summary:*\n• ✅ Healthy: {{ $json.summary.healthy }}\n• ⚠️ Warning: {{ $json.summary.warning }}\n• 🚨 Critical: {{ $json.summary.critical }}\n\n{{ $json.has_critical ? '🚨 *CRITICAL ALERTS:*' : '⚠️ *Alerts:*' }}\n{{ $json.alerts.map(a => `\\n*${a.company_name}* (${a.client_code}) - ${a.status.toUpperCase()}\\n${a.alerts.map(al => `  • [${al.type}] ${al.message}`).join('\\n')}\\n  Usage: Contacts ${a.usage.contacts} | Keywords ${a.usage.keywords} | Emails ${a.usage.emails}`).join('\\n') }}",
+        "options": {}
+      },
+      "id": "send-usage-report",
+      "name": "Send Usage Report",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1130, 200],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.has_critical }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "has-critical-alerts",
+      "name": "Has Critical?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1130, 400]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Send email to critical clients about their usage\nconst data = $input.first().json;\nconst criticalAlerts = data.alerts.filter(a => a.status === 'critical');\n\nreturn criticalAlerts.map(alert => ({\n  json: {\n    to_email: alert.contact_email,\n    client_code: alert.client_code,\n    company_name: alert.company_name,\n    alerts: alert.alerts,\n    usage: alert.usage\n  }\n}));"
+      },
+      "id": "prepare-client-emails",
+      "name": "Prepare Client Emails",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1350, 400]
+    },
+    {
+      "parameters": {
+        "fromEmail": "support@{{ $env.COMPANY_DOMAIN }}",
+        "toEmail": "={{ $json.to_email }}",
+        "subject": "⚠️ GreeVo Usage Alert - {{ $json.company_name }}",
+        "contentType": "html",
+        "content": "<h2>Usage Alert for {{ $json.company_name }}</h2><p>Your account is approaching or has reached usage limits:</p><ul>{{ $json.alerts.map(a => `<li><strong>[${a.type.toUpperCase()}]</strong> ${a.message}</li>`).join('') }}</ul><h3>Current Usage</h3><ul><li>Contacts: {{ $json.usage.contacts }}</li><li>Keywords: {{ $json.usage.keywords }}</li><li>Emails: {{ $json.usage.emails }}</li></ul><p>Please contact us to upgrade your plan or optimize usage.</p>",
+        "options": {}
+      },
+      "id": "send-client-alert-email",
+      "name": "Send Client Alert Email",
+      "type": "n8n-nodes-base.sendGrid",
+      "typeVersion": 1,
+      "position": [1570, 400],
+      "credentials": {
+        "sendGridApi": {
+          "id": "sendgrid-cred",
+          "name": "SendGrid API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 8 AM": {
+      "main": [[{ "node": "Get All Client Usage", "type": "main", "index": 0 }]]
+    },
+    "Get All Client Usage": {
+      "main": [[{ "node": "Analyze Usage", "type": "main", "index": 0 }]]
+    },
+    "Analyze Usage": {
+      "main": [[{ "node": "Has Alerts?", "type": "main", "index": 0 }]]
+    },
+    "Has Alerts?": {
+      "main": [
+        [
+          { "node": "Send Usage Report", "type": "main", "index": 0 },
+          { "node": "Has Critical?", "type": "main", "index": 0 }
+        ],
+        []
+      ]
+    },
+    "Has Critical?": {
+      "main": [
+        [{ "node": "Prepare Client Emails", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Prepare Client Emails": {
+      "main": [[{ "node": "Send Client Alert Email", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "System" },
+    { "name": "Multi-Tenant" },
+    { "name": "Monitoring" }
+  ]
+}

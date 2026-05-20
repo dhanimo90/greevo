@@ -1,0 +1,49 @@
+version: '3.8'
+
+# Staging environment - extends base docker-compose.yml
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.staging.yml up -d
+
+services:
+  n8n:
+    container_name: greevo-n8n-staging
+    environment:
+      - N8N_BASIC_AUTH_USER=${N8N_USER:-admin}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_PASSWORD:-staging_pass}
+      - N8N_HOST=${N8N_HOST:-staging.greevo.local}
+      - N8N_PROTOCOL=http
+      - WEBHOOK_URL=http://${N8N_HOST:-staging.greevo.local}:5678/
+      - NODE_ENV=development
+      - N8N_LOG_LEVEL=debug
+      - EXECUTIONS_DATA_PRUNE=true
+      - EXECUTIONS_DATA_MAX_AGE=48
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - N8N_HIRING_BANNER_ENABLED=false
+    ports:
+      - "5678:5678"
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+
+  postgres:
+    container_name: greevo-postgres-staging
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-greevo_staging}
+      - POSTGRES_USER=${POSTGRES_USER:-greevo}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-staging_secret}
+    ports:
+      - "5433:5432"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  redis:
+    container_name: greevo-redis-staging
+    ports:
+      - "6380:6379"
+    deploy:
+      resources:
+        limits:
+          memory: 128M
