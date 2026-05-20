@@ -1,0 +1,138 @@
+{
+  "name": "SEO - Site Health Check",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 5 * * *" }]
+        }
+      },
+      "id": "daily-5am",
+      "name": "Daily 5 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Daftar URL penting yang perlu di-check\nconst domain = $env.COMPANY_DOMAIN || 'example.com';\nconst criticalPages = [\n  '/',\n  '/products',\n  '/pricing',\n  '/contact',\n  '/blog',\n  '/about',\n  '/login',\n  '/signup'\n];\n\nconst results = criticalPages.map(page => ({\n  json: {\n    url: `https://${domain}${page}`,\n    page_type: page === '/' ? 'homepage' : page.replace('/', ''),\n    is_critical: ['/', '/products', '/pricing', '/login'].includes(page)\n  }\n}));\n\nreturn results;"
+      },
+      "id": "define-pages",
+      "name": "Define Critical Pages",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "method": "GET",
+        "options": {
+          "timeout": 30000,
+          "redirect": { "redirect": { "followRedirects": true, "maxRedirects": 5 } },
+          "response": { "response": { "fullResponse": true } }
+        }
+      },
+      "id": "check-page",
+      "name": "Check Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [690, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "functionCode": "const items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const response = item.json;\n  const originalData = $node['Define Critical Pages'].json;\n  \n  const statusCode = response.statusCode || response.status || 0;\n  const responseTime = response.responseTime || 0;\n  const headers = response.headers || {};\n  \n  // Check SSL\n  const hasSSL = originalData.url.startsWith('https');\n  \n  // Analyze issues\n  const issues = [];\n  \n  if (statusCode >= 400) {\n    issues.push({ type: 'error', message: `HTTP ${statusCode} error` });\n  }\n  if (responseTime > 3000) {\n    issues.push({ type: 'warning', message: `Slow response: ${responseTime}ms` });\n  }\n  if (responseTime > 5000) {\n    issues.push({ type: 'critical', message: `Very slow response: ${responseTime}ms` });\n  }\n  if (!headers['content-encoding']?.includes('gzip')) {\n    issues.push({ type: 'info', message: 'No gzip compression detected' });\n  }\n  if (!headers['strict-transport-security']) {\n    issues.push({ type: 'warning', message: 'Missing HSTS header' });\n  }\n  if (!headers['x-content-type-options']) {\n    issues.push({ type: 'info', message: 'Missing X-Content-Type-Options header' });\n  }\n\n  const hasCriticalIssues = issues.some(i => i.type === 'critical' || i.type === 'error');\n\n  results.push({\n    json: {\n      url: originalData.url,\n      page_type: originalData.page_type,\n      is_critical: originalData.is_critical,\n      status_code: statusCode,\n      response_time_ms: responseTime,\n      has_ssl: hasSSL,\n      issues: issues,\n      issue_count: issues.length,\n      has_critical_issues: hasCriticalIssues,\n      checked_at: new Date().toISOString()\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "analyze-health",
+      "name": "Analyze Health",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO site_health_checks (url, status_code, response_time_ms, has_ssl, issues) VALUES ('{{ $json.url }}', {{ $json.status_code }}, {{ $json.response_time_ms }}, {{ $json.has_ssl }}, '{{ JSON.stringify($json.issues) }}'::jsonb)",
+        "options": {}
+      },
+      "id": "save-health-check",
+      "name": "Save Health Check",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.has_critical_issues }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "has-critical",
+      "name": "Has Critical Issues?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1350, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#dev-alerts",
+        "text": "🚨 *SITE HEALTH ALERT*\n\n*URL:* {{ $json.url }}\n*Status:* {{ $json.status_code }}\n*Response Time:* {{ $json.response_time_ms }}ms\n*Critical:* {{ $json.is_critical ? 'YES - Critical Page' : 'No' }}\n\n*Issues:*\n{{ $json.issues.map(i => `• [${i.type.toUpperCase()}] ${i.message}`).join('\\n') }}\n\n⚡ Immediate attention required!",
+        "options": {}
+      },
+      "id": "alert-critical",
+      "name": "Alert Critical Issue",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1570, 200],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 5 AM": {
+      "main": [[{ "node": "Define Critical Pages", "type": "main", "index": 0 }]]
+    },
+    "Define Critical Pages": {
+      "main": [[{ "node": "Check Page", "type": "main", "index": 0 }]]
+    },
+    "Check Page": {
+      "main": [[{ "node": "Analyze Health", "type": "main", "index": 0 }]]
+    },
+    "Analyze Health": {
+      "main": [[{ "node": "Save Health Check", "type": "main", "index": 0 }]]
+    },
+    "Save Health Check": {
+      "main": [[{ "node": "Has Critical Issues?", "type": "main", "index": 0 }]]
+    },
+    "Has Critical Issues?": {
+      "main": [
+        [{ "node": "Alert Critical Issue", "type": "main", "index": 0 }],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "SEO" },
+    { "name": "Site Health" },
+    { "name": "Monitoring" }
+  ]
+}

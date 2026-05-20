@@ -1,0 +1,173 @@
+{
+  "name": "Reporting - GA4 Data Sync & Dashboard",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 2 * * *" }]
+        }
+      },
+      "id": "daily-2am",
+      "name": "Daily 2 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://analyticsdata.googleapis.com/v1beta/properties/{{ $env.GA4_PROPERTY_ID }}:runReport",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "body",
+              "value": "={{ JSON.stringify({ dateRanges: [{ startDate: 'yesterday', endDate: 'yesterday' }], metrics: [ { name: 'sessions' }, { name: 'totalUsers' }, { name: 'newUsers' }, { name: 'bounceRate' }, { name: 'averageSessionDuration' }, { name: 'screenPageViews' }, { name: 'conversions' } ], dimensions: [ { name: 'date' }, { name: 'sessionDefaultChannelGroup' } ] }) }}"
+            }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "fetch-ga4-traffic",
+      "name": "Fetch GA4 Traffic Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [470, 200],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "google-oauth-cred",
+          "name": "Google OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://analyticsdata.googleapis.com/v1beta/properties/{{ $env.GA4_PROPERTY_ID }}:runReport",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "body",
+              "value": "={{ JSON.stringify({ dateRanges: [{ startDate: 'yesterday', endDate: 'yesterday' }], metrics: [ { name: 'screenPageViews' }, { name: 'averageSessionDuration' }, { name: 'bounceRate' } ], dimensions: [ { name: 'pagePath' } ], orderBys: [{ metric: { metricName: 'screenPageViews' }, desc: true }], limit: 20 }) }}"
+            }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "fetch-ga4-pages",
+      "name": "Fetch GA4 Top Pages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [470, 400],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "google-oauth-cred",
+          "name": "Google OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const trafficResponse = $node['Fetch GA4 Traffic Data'].json;\nconst pagesResponse = $node['Fetch GA4 Top Pages'].json;\n\n// Parse traffic data\nconst trafficRows = trafficResponse.rows || [];\nconst trafficByChannel = {};\nlet totalMetrics = {\n  sessions: 0,\n  users: 0,\n  new_users: 0,\n  bounce_rate: 0,\n  avg_session_duration: 0,\n  pageviews: 0,\n  conversions: 0\n};\n\nfor (const row of trafficRows) {\n  const channel = row.dimensionValues?.[1]?.value || 'Unknown';\n  const metrics = row.metricValues || [];\n  \n  const channelData = {\n    sessions: parseInt(metrics[0]?.value || 0),\n    users: parseInt(metrics[1]?.value || 0),\n    new_users: parseInt(metrics[2]?.value || 0),\n    bounce_rate: parseFloat(metrics[3]?.value || 0),\n    avg_duration: parseFloat(metrics[4]?.value || 0),\n    pageviews: parseInt(metrics[5]?.value || 0),\n    conversions: parseInt(metrics[6]?.value || 0)\n  };\n  \n  trafficByChannel[channel] = channelData;\n  totalMetrics.sessions += channelData.sessions;\n  totalMetrics.users += channelData.users;\n  totalMetrics.new_users += channelData.new_users;\n  totalMetrics.pageviews += channelData.pageviews;\n  totalMetrics.conversions += channelData.conversions;\n}\n\n// Parse top pages\nconst pageRows = pagesResponse.rows || [];\nconst topPages = pageRows.slice(0, 10).map(row => ({\n  path: row.dimensionValues?.[0]?.value || '/',\n  pageviews: parseInt(row.metricValues?.[0]?.value || 0),\n  avg_duration: parseFloat(row.metricValues?.[1]?.value || 0),\n  bounce_rate: parseFloat(row.metricValues?.[2]?.value || 0)\n}));\n\nconst date = trafficRows[0]?.dimensionValues?.[0]?.value || new Date(Date.now() - 86400000).toISOString().split('T')[0];\n\nreturn [{\n  json: {\n    date: date,\n    total: totalMetrics,\n    by_channel: trafficByChannel,\n    top_pages: topPages\n  }\n}];"
+      },
+      "id": "process-ga4-data",
+      "name": "Process GA4 Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO analytics_snapshots (report_type, period_start, period_end, metrics, dimensions, source) VALUES ('daily', '{{ $json.date }}', '{{ $json.date }}', '{{ JSON.stringify({ total: $json.total, top_pages: $json.top_pages }) }}'::jsonb, '{{ JSON.stringify({ by_channel: $json.by_channel }) }}'::jsonb, 'ga4')",
+        "options": {}
+      },
+      "id": "save-ga4-data",
+      "name": "Save GA4 Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.total.sessions }}",
+              "operation": "smaller",
+              "value2": "={{ $env.MIN_DAILY_SESSIONS || 100 }}"
+            }
+          ]
+        }
+      },
+      "id": "traffic-drop",
+      "name": "Traffic Drop?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1350, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#marketing-alerts",
+        "text": "⚠️ *Traffic Drop Alert*\n\n*Date:* {{ $json.date }}\n*Sessions:* {{ $json.total.sessions }} (below threshold)\n*Users:* {{ $json.total.users }}\n*Pageviews:* {{ $json.total.pageviews }}\n\nPlease investigate potential causes:\n• Technical issues (check site health)\n• Algorithm update\n• Campaign changes\n• Seasonal patterns",
+        "options": {}
+      },
+      "id": "alert-traffic-drop",
+      "name": "Alert Traffic Drop",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1570, 200],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 2 AM": {
+      "main": [[
+        { "node": "Fetch GA4 Traffic Data", "type": "main", "index": 0 },
+        { "node": "Fetch GA4 Top Pages", "type": "main", "index": 0 }
+      ]]
+    },
+    "Fetch GA4 Traffic Data": {
+      "main": [[{ "node": "Process GA4 Data", "type": "main", "index": 0 }]]
+    },
+    "Fetch GA4 Top Pages": {
+      "main": [[{ "node": "Process GA4 Data", "type": "main", "index": 0 }]]
+    },
+    "Process GA4 Data": {
+      "main": [[{ "node": "Save GA4 Data", "type": "main", "index": 0 }]]
+    },
+    "Save GA4 Data": {
+      "main": [[{ "node": "Traffic Drop?", "type": "main", "index": 0 }]]
+    },
+    "Traffic Drop?": {
+      "main": [
+        [{ "node": "Alert Traffic Drop", "type": "main", "index": 0 }],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "Reporting" },
+    { "name": "GA4" },
+    { "name": "Analytics" }
+  ]
+}

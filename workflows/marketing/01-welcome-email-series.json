@@ -1,0 +1,229 @@
+{
+  "name": "Marketing - Welcome Email Series",
+  "nodes": [
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.* FROM contacts c LEFT JOIN email_campaigns ec ON ec.id = (SELECT campaign_id FROM email_campaign_sends WHERE contact_id = c.id AND campaign_type = 'welcome' LIMIT 1) WHERE c.created_at > NOW() - INTERVAL '1 hour' AND c.lead_status = 'new' AND NOT EXISTS (SELECT 1 FROM lead_activities WHERE contact_id = c.id AND activity_type = 'welcome_email_sent')",
+        "options": {}
+      },
+      "id": "get-new-contacts",
+      "name": "Get New Contacts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [250, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "hours", "hoursInterval": 1 }]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Every Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [50, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const contacts = $input.all();\nconst results = [];\n\nfor (const item of contacts) {\n  const contact = item.json;\n  \n  // Personalisasi berdasarkan data yang tersedia\n  const firstName = contact.first_name || 'there';\n  const company = contact.company ? ` at ${contact.company}` : '';\n  \n  results.push({\n    json: {\n      ...contact,\n      personalized_greeting: `Hi ${firstName}`,\n      personalized_intro: `Welcome to our community${company}!`,\n      email_subject: `Welcome ${firstName}! Here's what you can expect`,\n      template_id: 'd-welcome-series-1',\n      send_at: new Date().toISOString(),\n      series_step: 1\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "personalize-email",
+      "name": "Personalize Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "hello@{{ $env.COMPANY_DOMAIN }}",
+        "toEmail": "={{ $json.email }}",
+        "subject": "={{ $json.email_subject }}",
+        "contentType": "html",
+        "content": "",
+        "options": {
+          "templateId": "={{ $json.template_id }}",
+          "dynamicTemplateData": {
+            "first_name": "={{ $json.first_name }}",
+            "greeting": "={{ $json.personalized_greeting }}",
+            "intro": "={{ $json.personalized_intro }}",
+            "company_name": "={{ $env.COMPANY_NAME }}"
+          }
+        }
+      },
+      "id": "send-welcome-email",
+      "name": "Send Welcome Email",
+      "type": "n8n-nodes-base.sendGrid",
+      "typeVersion": 1,
+      "position": [690, 300],
+      "credentials": {
+        "sendGridApi": {
+          "id": "sendgrid-cred",
+          "name": "SendGrid API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) VALUES ({{ $json.id }}, 'welcome_email_sent', '{\"series_step\": {{ $json.series_step }}, \"template_id\": \"{{ $json.template_id }}\", \"sent_at\": \"{{ $json.send_at }}\"}', 5)",
+        "options": {}
+      },
+      "id": "log-email-sent",
+      "name": "Log Email Sent",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 3,
+        "unit": "days"
+      },
+      "id": "wait-3-days",
+      "name": "Wait 3 Days",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1130, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.*, la.activity_data FROM contacts c JOIN lead_activities la ON la.contact_id = c.id WHERE c.id = {{ $json.id }} AND la.activity_type = 'email_opened' AND la.activity_data->>'template_id' = '{{ $json.template_id }}' LIMIT 1",
+        "options": {}
+      },
+      "id": "check-opened",
+      "name": "Check If Opened",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1350, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.id }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "was-opened",
+      "name": "Was Opened?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1570, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "hello@{{ $env.COMPANY_DOMAIN }}",
+        "toEmail": "={{ $json.email }}",
+        "subject": "={{ $json.first_name }}, here are some resources to get you started",
+        "contentType": "html",
+        "content": "",
+        "options": {
+          "templateId": "d-welcome-series-2-engaged",
+          "dynamicTemplateData": {
+            "first_name": "={{ $json.first_name }}",
+            "company_name": "={{ $env.COMPANY_NAME }}"
+          }
+        }
+      },
+      "id": "send-followup-engaged",
+      "name": "Send Follow-up (Engaged)",
+      "type": "n8n-nodes-base.sendGrid",
+      "typeVersion": 1,
+      "position": [1790, 200],
+      "credentials": {
+        "sendGridApi": {
+          "id": "sendgrid-cred",
+          "name": "SendGrid API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "hello@{{ $env.COMPANY_DOMAIN }}",
+        "toEmail": "={{ $json.email }}",
+        "subject": "={{ $json.first_name }}, did you miss our first email?",
+        "contentType": "html",
+        "content": "",
+        "options": {
+          "templateId": "d-welcome-series-2-not-engaged",
+          "dynamicTemplateData": {
+            "first_name": "={{ $json.first_name }}",
+            "company_name": "={{ $env.COMPANY_NAME }}"
+          }
+        }
+      },
+      "id": "send-followup-not-engaged",
+      "name": "Send Follow-up (Not Engaged)",
+      "type": "n8n-nodes-base.sendGrid",
+      "typeVersion": 1,
+      "position": [1790, 400],
+      "credentials": {
+        "sendGridApi": {
+          "id": "sendgrid-cred",
+          "name": "SendGrid API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every Hour": {
+      "main": [[{ "node": "Get New Contacts", "type": "main", "index": 0 }]]
+    },
+    "Get New Contacts": {
+      "main": [[{ "node": "Personalize Email", "type": "main", "index": 0 }]]
+    },
+    "Personalize Email": {
+      "main": [[{ "node": "Send Welcome Email", "type": "main", "index": 0 }]]
+    },
+    "Send Welcome Email": {
+      "main": [[{ "node": "Log Email Sent", "type": "main", "index": 0 }]]
+    },
+    "Log Email Sent": {
+      "main": [[{ "node": "Wait 3 Days", "type": "main", "index": 0 }]]
+    },
+    "Wait 3 Days": {
+      "main": [[{ "node": "Check If Opened", "type": "main", "index": 0 }]]
+    },
+    "Check If Opened": {
+      "main": [[{ "node": "Was Opened?", "type": "main", "index": 0 }]]
+    },
+    "Was Opened?": {
+      "main": [
+        [{ "node": "Send Follow-up (Engaged)", "type": "main", "index": 0 }],
+        [{ "node": "Send Follow-up (Not Engaged)", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "Marketing" },
+    { "name": "Email" },
+    { "name": "Welcome Series" }
+  ]
+}

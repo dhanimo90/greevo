@@ -1,0 +1,192 @@
+{
+  "name": "Marketing - Re-engagement Campaign",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 10 * * 1" }]
+        }
+      },
+      "id": "weekly-monday",
+      "name": "Every Monday 10 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.*, (SELECT MAX(la.created_at) FROM lead_activities la WHERE la.contact_id = c.id) as last_activity_date, EXTRACT(DAY FROM NOW() - (SELECT MAX(la.created_at) FROM lead_activities la WHERE la.contact_id = c.id)) as days_inactive FROM contacts c WHERE c.lead_status NOT IN ('customer', 'lost') AND (SELECT MAX(la.created_at) FROM lead_activities la WHERE la.contact_id = c.id) < NOW() - INTERVAL '30 days' AND NOT EXISTS ( SELECT 1 FROM lead_activities la WHERE la.contact_id = c.id AND la.activity_type = 're_engagement_sent' AND la.created_at > NOW() - INTERVAL '14 days' ) ORDER BY c.lead_score DESC LIMIT 30",
+        "options": {}
+      },
+      "id": "get-inactive-contacts",
+      "name": "Get Inactive Contacts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const contacts = $input.all();\nconst results = [];\n\nfor (const item of contacts) {\n  const contact = item.json;\n  const daysInactive = contact.days_inactive || 30;\n  \n  let template, subject, urgency;\n  \n  if (daysInactive > 90) {\n    // Very cold - last chance\n    template = 'd-reengagement-final';\n    subject = `${contact.first_name || 'Hi'}, we miss you! Here's something special`;\n    urgency = 'high';\n  } else if (daysInactive > 60) {\n    // Cold - incentive offer\n    template = 'd-reengagement-incentive';\n    subject = `${contact.first_name || 'Hi'}, exclusive offer just for you`;\n    urgency = 'medium';\n  } else {\n    // Warm - gentle reminder\n    template = 'd-reengagement-gentle';\n    subject = `${contact.first_name || 'Hi'}, here's what you've been missing`;\n    urgency = 'low';\n  }\n\n  results.push({\n    json: {\n      ...contact,\n      template_id: template,\n      email_subject: subject,\n      urgency: urgency,\n      days_inactive: daysInactive\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "segment-by-inactivity",
+      "name": "Segment by Inactivity",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "hello@{{ $env.COMPANY_DOMAIN }}",
+        "toEmail": "={{ $json.email }}",
+        "subject": "={{ $json.email_subject }}",
+        "contentType": "html",
+        "content": "",
+        "options": {
+          "templateId": "={{ $json.template_id }}",
+          "dynamicTemplateData": {
+            "first_name": "={{ $json.first_name }}",
+            "days_inactive": "={{ $json.days_inactive }}",
+            "urgency": "={{ $json.urgency }}"
+          }
+        }
+      },
+      "id": "send-reengagement",
+      "name": "Send Re-engagement Email",
+      "type": "n8n-nodes-base.sendGrid",
+      "typeVersion": 1,
+      "position": [910, 300],
+      "credentials": {
+        "sendGridApi": {
+          "id": "sendgrid-cred",
+          "name": "SendGrid API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) VALUES ({{ $json.id }}, 're_engagement_sent', '{\"template\": \"{{ $json.template_id }}\", \"urgency\": \"{{ $json.urgency }}\", \"days_inactive\": {{ $json.days_inactive }}}', 0)",
+        "options": {}
+      },
+      "id": "log-reengagement",
+      "name": "Log Re-engagement",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 7,
+        "unit": "days"
+      },
+      "id": "wait-7-days",
+      "name": "Wait 7 Days",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1350, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.id, c.email, c.first_name, EXISTS( SELECT 1 FROM lead_activities la WHERE la.contact_id = c.id AND la.created_at > NOW() - INTERVAL '7 days' AND la.activity_type IN ('email_opened', 'email_clicked', 'page_view') ) as re_engaged FROM contacts c WHERE c.id = {{ $json.id }}",
+        "options": {}
+      },
+      "id": "check-reengagement",
+      "name": "Check Re-engagement",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1570, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.re_engaged }}",
+              "value2": false
+            }
+          ]
+        }
+      },
+      "id": "still-inactive",
+      "name": "Still Inactive?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1790, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE contacts SET lead_status = 'lost', lead_score = GREATEST(0, lead_score - 20) WHERE id = {{ $json.id }} AND (SELECT MAX(la.created_at) FROM lead_activities la WHERE la.contact_id = {{ $json.id }}) < NOW() - INTERVAL '90 days'",
+        "options": {}
+      },
+      "id": "mark-as-lost",
+      "name": "Mark as Lost (if >90 days)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [2010, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every Monday 10 AM": {
+      "main": [[{ "node": "Get Inactive Contacts", "type": "main", "index": 0 }]]
+    },
+    "Get Inactive Contacts": {
+      "main": [[{ "node": "Segment by Inactivity", "type": "main", "index": 0 }]]
+    },
+    "Segment by Inactivity": {
+      "main": [[{ "node": "Send Re-engagement Email", "type": "main", "index": 0 }]]
+    },
+    "Send Re-engagement Email": {
+      "main": [[{ "node": "Log Re-engagement", "type": "main", "index": 0 }]]
+    },
+    "Log Re-engagement": {
+      "main": [[{ "node": "Wait 7 Days", "type": "main", "index": 0 }]]
+    },
+    "Wait 7 Days": {
+      "main": [[{ "node": "Check Re-engagement", "type": "main", "index": 0 }]]
+    },
+    "Check Re-engagement": {
+      "main": [[{ "node": "Still Inactive?", "type": "main", "index": 0 }]]
+    },
+    "Still Inactive?": {
+      "main": [
+        [{ "node": "Mark as Lost (if >90 days)", "type": "main", "index": 0 }],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "Marketing" },
+    { "name": "Re-engagement" },
+    { "name": "Automation" }
+  ]
+}

@@ -1,0 +1,174 @@
+{
+  "name": "SEO - Competitor Analysis Tracking",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 8 * * 1" }]
+        }
+      },
+      "id": "weekly-monday",
+      "name": "Weekly Monday 8 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Konfigurasi competitor domains\nconst competitors = [\n  { domain: 'competitor1.com', name: 'Competitor A' },\n  { domain: 'competitor2.com', name: 'Competitor B' },\n  { domain: 'competitor3.com', name: 'Competitor C' }\n];\n\nconst ourDomain = $env.COMPANY_DOMAIN || 'ourdomain.com';\n\nreturn competitors.map(c => ({\n  json: {\n    competitor_domain: c.domain,\n    competitor_name: c.name,\n    our_domain: ourDomain\n  }\n}));"
+      },
+      "id": "define-competitors",
+      "name": "Define Competitors",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.ahrefs.com/v3/site-explorer/organic-keywords",
+        "method": "GET",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "target", "value": "={{ $json.competitor_domain }}" },
+            { "name": "country", "value": "id" },
+            { "name": "limit", "value": "50" },
+            { "name": "order_by", "value": "volume:desc" }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "get-competitor-keywords",
+      "name": "Get Competitor Keywords",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [690, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ahrefs-cred",
+          "name": "Ahrefs API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const response = $input.first().json;\nconst competitorData = $node['Define Competitors'].json;\nconst keywords = response.keywords || response.organic_keywords || [];\nconst results = [];\n\nfor (const kw of keywords) {\n  results.push({\n    json: {\n      competitor_domain: competitorData.competitor_domain,\n      competitor_name: competitorData.competitor_name,\n      our_domain: competitorData.our_domain,\n      keyword: kw.keyword || kw.term,\n      competitor_position: kw.position || kw.rank,\n      search_volume: kw.volume || kw.search_volume,\n      traffic: kw.traffic || 0,\n      keyword_difficulty: kw.difficulty || kw.kd || 0\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "parse-competitor-data",
+      "name": "Parse Competitor Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT kr.position FROM tracked_keywords tk JOIN keyword_rankings kr ON kr.keyword_id = tk.id WHERE tk.keyword = '{{ $json.keyword }}' ORDER BY kr.checked_at DESC LIMIT 1",
+        "options": {}
+      },
+      "id": "get-our-position",
+      "name": "Get Our Position",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const data = item.json;\n  const prevNode = $node['Parse Competitor Data'].json;\n  const ourPosition = data.position || null;\n  const competitorPosition = prevNode.competitor_position;\n  \n  const gap = ourPosition && competitorPosition \n    ? ourPosition - competitorPosition \n    : null;\n\n  results.push({\n    json: {\n      ...prevNode,\n      our_position: ourPosition,\n      gap: gap,\n      opportunity: !ourPosition || ourPosition > 10 ? 'high' : \n                   ourPosition > competitorPosition ? 'medium' : 'low'\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "calculate-gap",
+      "name": "Calculate Gap",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1350, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO competitor_tracking (competitor_domain, our_domain, keyword, competitor_position, our_position, gap) VALUES ('{{ $json.competitor_domain }}', '{{ $json.our_domain }}', '{{ $json.keyword }}', {{ $json.competitor_position || 'NULL' }}, {{ $json.our_position || 'NULL' }}, {{ $json.gap || 'NULL' }})",
+        "options": {}
+      },
+      "id": "save-competitor-data",
+      "name": "Save Competitor Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1570, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const allData = $input.all().map(i => i.json);\n\n// Summarize opportunities\nconst highOpportunities = allData.filter(d => d.opportunity === 'high');\nconst totalKeywords = allData.length;\nconst avgGap = allData.filter(d => d.gap).reduce((sum, d) => sum + Math.abs(d.gap), 0) / (allData.filter(d => d.gap).length || 1);\n\n// Top opportunities by volume\nconst topOpportunities = highOpportunities\n  .sort((a, b) => (b.search_volume || 0) - (a.search_volume || 0))\n  .slice(0, 10);\n\nreturn [{\n  json: {\n    summary: {\n      total_keywords_analyzed: totalKeywords,\n      high_opportunities: highOpportunities.length,\n      average_position_gap: Math.round(avgGap),\n      top_opportunities: topOpportunities.map(o => ({\n        keyword: o.keyword,\n        competitor: o.competitor_name,\n        their_position: o.competitor_position,\n        our_position: o.our_position || 'Not ranking',\n        volume: o.search_volume\n      }))\n    }\n  }\n}];"
+      },
+      "id": "summarize",
+      "name": "Summarize Opportunities",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1790, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#seo-strategy",
+        "text": "📊 *Weekly Competitor Analysis Report*\n\n*Keywords Analyzed:* {{ $json.summary.total_keywords_analyzed }}\n*High Opportunities:* {{ $json.summary.high_opportunities }}\n*Avg Position Gap:* {{ $json.summary.average_position_gap }}\n\n*Top Keyword Opportunities:*\n{{ $json.summary.top_opportunities.map((o, i) => `${i+1}. \"${o.keyword}\" - Vol: ${o.volume} | Competitor #${o.their_position} | Us: ${o.our_position}`).join('\\n') }}\n\n💡 Focus on high-volume keywords where competitors rank but we don't.",
+        "options": {}
+      },
+      "id": "report-slack",
+      "name": "Report to Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [2010, 300],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Weekly Monday 8 AM": {
+      "main": [[{ "node": "Define Competitors", "type": "main", "index": 0 }]]
+    },
+    "Define Competitors": {
+      "main": [[{ "node": "Get Competitor Keywords", "type": "main", "index": 0 }]]
+    },
+    "Get Competitor Keywords": {
+      "main": [[{ "node": "Parse Competitor Data", "type": "main", "index": 0 }]]
+    },
+    "Parse Competitor Data": {
+      "main": [[{ "node": "Get Our Position", "type": "main", "index": 0 }]]
+    },
+    "Get Our Position": {
+      "main": [[{ "node": "Calculate Gap", "type": "main", "index": 0 }]]
+    },
+    "Calculate Gap": {
+      "main": [[{ "node": "Save Competitor Data", "type": "main", "index": 0 }]]
+    },
+    "Save Competitor Data": {
+      "main": [[{ "node": "Summarize Opportunities", "type": "main", "index": 0 }]]
+    },
+    "Summarize Opportunities": {
+      "main": [[{ "node": "Report to Slack", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "SEO" },
+    { "name": "Competitor" },
+    { "name": "Weekly" }
+  ]
+}

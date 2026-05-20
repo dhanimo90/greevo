@@ -1,0 +1,188 @@
+{
+  "name": "CRM - HubSpot Bidirectional Sync",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "minutes", "minutesInterval": 15 }]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "returnAll": false,
+        "limit": 100,
+        "filters": {
+          "lastModifiedDate": "={{ new Date(Date.now() - 15 * 60 * 1000).toISOString() }}"
+        },
+        "additionalFields": {
+          "properties": ["email", "firstname", "lastname", "company", "phone", "jobtitle", "lifecyclestage", "hubspot_owner_id"]
+        }
+      },
+      "id": "get-hubspot-contacts",
+      "name": "Get Updated HubSpot Contacts",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2,
+      "position": [470, 200],
+      "credentials": {
+        "hubspotApi": {
+          "id": "hubspot-cred",
+          "name": "HubSpot API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, email, external_id, first_name, last_name, company, lead_status, updated_at FROM contacts WHERE updated_at > NOW() - INTERVAL '15 minutes' AND source != 'hubspot'",
+        "options": {}
+      },
+      "id": "get-local-updates",
+      "name": "Get Local Updates",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const hubspotContacts = $input.all();\nconst results = [];\n\nfor (const item of hubspotContacts) {\n  const hs = item.json;\n  results.push({\n    json: {\n      email: hs.properties?.email || hs.email,\n      first_name: hs.properties?.firstname || hs.firstname,\n      last_name: hs.properties?.lastname || hs.lastname,\n      company: hs.properties?.company || hs.company,\n      phone: hs.properties?.phone || hs.phone,\n      job_title: hs.properties?.jobtitle || hs.jobtitle,\n      external_id: hs.id,\n      source: 'hubspot',\n      lead_status: mapHubspotStage(hs.properties?.lifecyclestage)\n    }\n  });\n}\n\nfunction mapHubspotStage(stage) {\n  const mapping = {\n    'subscriber': 'new',\n    'lead': 'new',\n    'marketingqualifiedlead': 'contacted',\n    'salesqualifiedlead': 'qualified',\n    'opportunity': 'opportunity',\n    'customer': 'customer',\n    'evangelist': 'customer'\n  };\n  return mapping[stage] || 'new';\n}\n\nreturn results;"
+      },
+      "id": "transform-hubspot",
+      "name": "Transform HubSpot Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO contacts (email, first_name, last_name, company, phone, job_title, external_id, source, lead_status) VALUES ('{{ $json.email }}', '{{ $json.first_name }}', '{{ $json.last_name }}', '{{ $json.company }}', '{{ $json.phone }}', '{{ $json.job_title }}', '{{ $json.external_id }}', 'hubspot', '{{ $json.lead_status }}') ON CONFLICT (email) DO UPDATE SET first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name, company = EXCLUDED.company, phone = EXCLUDED.phone, job_title = EXCLUDED.job_title, external_id = EXCLUDED.external_id, lead_status = EXCLUDED.lead_status, updated_at = NOW() RETURNING *",
+        "options": {}
+      },
+      "id": "upsert-from-hubspot",
+      "name": "Upsert from HubSpot",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const localContacts = $input.all();\nconst results = [];\n\nfor (const item of localContacts) {\n  const contact = item.json;\n  results.push({\n    json: {\n      email: contact.email,\n      properties: {\n        firstname: contact.first_name,\n        lastname: contact.last_name,\n        company: contact.company,\n        lifecyclestage: mapToHubspotStage(contact.lead_status)\n      },\n      hubspot_id: contact.external_id\n    }\n  });\n}\n\nfunction mapToHubspotStage(status) {\n  const mapping = {\n    'new': 'lead',\n    'contacted': 'marketingqualifiedlead',\n    'qualified': 'salesqualifiedlead',\n    'opportunity': 'opportunity',\n    'customer': 'customer',\n    'lost': 'other'\n  };\n  return mapping[status] || 'lead';\n}\n\nreturn results;"
+      },
+      "id": "transform-local",
+      "name": "Transform for HubSpot",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.hubspot_id }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "has-hubspot-id",
+      "name": "Has HubSpot ID?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [910, 400]
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "contactId": "={{ $json.hubspot_id }}",
+        "additionalFields": {
+          "properties": "={{ $json.properties }}"
+        }
+      },
+      "id": "update-hubspot",
+      "name": "Update in HubSpot",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2,
+      "position": [1130, 350],
+      "credentials": {
+        "hubspotApi": {
+          "id": "hubspot-cred",
+          "name": "HubSpot API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "additionalFields": {
+          "email": "={{ $json.email }}",
+          "properties": "={{ $json.properties }}"
+        }
+      },
+      "id": "create-hubspot",
+      "name": "Create in HubSpot",
+      "type": "n8n-nodes-base.hubspot",
+      "typeVersion": 2,
+      "position": [1130, 500],
+      "credentials": {
+        "hubspotApi": {
+          "id": "hubspot-cred",
+          "name": "HubSpot API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 15 Minutes": {
+      "main": [[
+        { "node": "Get Updated HubSpot Contacts", "type": "main", "index": 0 },
+        { "node": "Get Local Updates", "type": "main", "index": 0 }
+      ]]
+    },
+    "Get Updated HubSpot Contacts": {
+      "main": [[{ "node": "Transform HubSpot Data", "type": "main", "index": 0 }]]
+    },
+    "Transform HubSpot Data": {
+      "main": [[{ "node": "Upsert from HubSpot", "type": "main", "index": 0 }]]
+    },
+    "Get Local Updates": {
+      "main": [[{ "node": "Transform for HubSpot", "type": "main", "index": 0 }]]
+    },
+    "Transform for HubSpot": {
+      "main": [[{ "node": "Has HubSpot ID?", "type": "main", "index": 0 }]]
+    },
+    "Has HubSpot ID?": {
+      "main": [
+        [{ "node": "Update in HubSpot", "type": "main", "index": 0 }],
+        [{ "node": "Create in HubSpot", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "CRM" },
+    { "name": "HubSpot" },
+    { "name": "Sync" }
+  ]
+}

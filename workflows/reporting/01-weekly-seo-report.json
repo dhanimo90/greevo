@@ -1,0 +1,176 @@
+{
+  "name": "Reporting - Weekly SEO Performance Report",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 9 * * 1" }]
+        }
+      },
+      "id": "weekly-monday-9am",
+      "name": "Monday 9 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH current_week AS ( SELECT tk.keyword, kr.position, kr.search_volume, kr.checked_at FROM tracked_keywords tk JOIN keyword_rankings kr ON kr.keyword_id = tk.id WHERE kr.checked_at > NOW() - INTERVAL '7 days' AND tk.is_active = true ), previous_week AS ( SELECT tk.keyword, kr.position FROM tracked_keywords tk JOIN keyword_rankings kr ON kr.keyword_id = tk.id WHERE kr.checked_at BETWEEN NOW() - INTERVAL '14 days' AND NOW() - INTERVAL '7 days' AND tk.is_active = true ) SELECT cw.keyword, cw.position as current_position, pw.position as previous_position, cw.position - COALESCE(pw.position, cw.position) as position_change, cw.search_volume FROM current_week cw LEFT JOIN previous_week pw ON cw.keyword = pw.keyword ORDER BY cw.search_volume DESC NULLS LAST",
+        "options": {}
+      },
+      "id": "get-ranking-data",
+      "name": "Get Ranking Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) as total_backlinks, COUNT(*) FILTER (WHERE first_seen > NOW() - INTERVAL '7 days') as new_backlinks, COUNT(*) FILTER (WHERE is_active = false AND last_checked > NOW() - INTERVAL '7 days') as lost_backlinks, ROUND(AVG(domain_rating)) as avg_dr, COUNT(*) FILTER (WHERE domain_rating >= 40) as high_quality_count FROM backlinks",
+        "options": {}
+      },
+      "id": "get-backlink-data",
+      "name": "Get Backlink Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT url, status_code, response_time_ms, issues, checked_at FROM site_health_checks WHERE checked_at > NOW() - INTERVAL '7 days' AND (status_code >= 400 OR response_time_ms > 3000) ORDER BY checked_at DESC",
+        "options": {}
+      },
+      "id": "get-health-issues",
+      "name": "Get Health Issues",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 600],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const rankingData = $node['Get Ranking Data'].json;\nconst backlinkData = $node['Get Backlink Data'].json;\nconst healthIssues = $node['Get Health Issues'].json;\n\n// Process rankings\nconst rankings = Array.isArray(rankingData) ? rankingData : [rankingData];\nconst improved = rankings.filter(r => r.position_change < 0).length;\nconst declined = rankings.filter(r => r.position_change > 0).length;\nconst unchanged = rankings.filter(r => r.position_change === 0).length;\nconst top10 = rankings.filter(r => r.current_position <= 10).length;\nconst top3 = rankings.filter(r => r.current_position <= 3).length;\n\n// Top movers\nconst topImproved = rankings\n  .filter(r => r.position_change < 0)\n  .sort((a, b) => a.position_change - b.position_change)\n  .slice(0, 5);\n\nconst topDeclined = rankings\n  .filter(r => r.position_change > 0)\n  .sort((a, b) => b.position_change - a.position_change)\n  .slice(0, 5);\n\n// Backlinks\nconst bl = Array.isArray(backlinkData) ? backlinkData[0] : backlinkData;\n\n// Health\nconst issues = Array.isArray(healthIssues) ? healthIssues : (healthIssues ? [healthIssues] : []);\n\nconst report = {\n  period: `${new Date(Date.now() - 7*24*60*60*1000).toISOString().split('T')[0]} - ${new Date().toISOString().split('T')[0]}`,\n  rankings: {\n    total_tracked: rankings.length,\n    top_3: top3,\n    top_10: top10,\n    improved: improved,\n    declined: declined,\n    unchanged: unchanged,\n    top_improved: topImproved.map(r => ({ keyword: r.keyword, change: r.position_change, position: r.current_position })),\n    top_declined: topDeclined.map(r => ({ keyword: r.keyword, change: r.position_change, position: r.current_position }))\n  },\n  backlinks: {\n    total: bl?.total_backlinks || 0,\n    new_this_week: bl?.new_backlinks || 0,\n    lost_this_week: bl?.lost_backlinks || 0,\n    avg_dr: bl?.avg_dr || 0,\n    high_quality: bl?.high_quality_count || 0\n  },\n  health: {\n    issues_found: issues.length,\n    critical_pages_affected: issues.filter(i => i.status_code >= 500).length\n  }\n};\n\nreturn [{ json: report }];"
+      },
+      "id": "compile-report",
+      "name": "Compile Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO analytics_snapshots (report_type, period_start, period_end, metrics, source) VALUES ('weekly', '{{ $json.period.split(' - ')[0] }}', '{{ $json.period.split(' - ')[1] }}', '{{ JSON.stringify($json) }}'::jsonb, 'seo_combined')",
+        "options": {}
+      },
+      "id": "save-snapshot",
+      "name": "Save Report Snapshot",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#seo-reports",
+        "text": "📊 *Weekly SEO Performance Report*\n📅 {{ $json.period }}\n\n━━━━━━━━━━━━━━━━━━━━\n🎯 *KEYWORD RANKINGS*\n━━━━━━━━━━━━━━━━━━━━\n• Total Tracked: {{ $json.rankings.total_tracked }}\n• Top 3: {{ $json.rankings.top_3 }} | Top 10: {{ $json.rankings.top_10 }}\n• 📈 Improved: {{ $json.rankings.improved }} | 📉 Declined: {{ $json.rankings.declined }} | ➡️ Unchanged: {{ $json.rankings.unchanged }}\n\n*Top Improvements:*\n{{ $json.rankings.top_improved.map(r => `  ✅ \"${r.keyword}\" → #${r.position} (${r.change})`).join('\\n') || '  None this week' }}\n\n*Top Declines:*\n{{ $json.rankings.top_declined.map(r => `  ⚠️ \"${r.keyword}\" → #${r.position} (+${r.change})`).join('\\n') || '  None this week' }}\n\n━━━━━━━━━━━━━━━━━━━━\n🔗 *BACKLINKS*\n━━━━━━━━━━━━━━━━━━━━\n• Total: {{ $json.backlinks.total }}\n• New: +{{ $json.backlinks.new_this_week }} | Lost: -{{ $json.backlinks.lost_this_week }}\n• Avg DR: {{ $json.backlinks.avg_dr }} | High Quality (DR≥40): {{ $json.backlinks.high_quality }}\n\n━━━━━━━━━━━━━━━━━━━━\n🏥 *SITE HEALTH*\n━━━━━━━━━━━━━━━━━━━━\n• Issues Found: {{ $json.health.issues_found }}\n• Critical Pages Affected: {{ $json.health.critical_pages_affected }}\n\n_Full report available in dashboard_",
+        "options": {}
+      },
+      "id": "send-slack-report",
+      "name": "Send Slack Report",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1350, 300],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "reports@{{ $env.COMPANY_DOMAIN }}",
+        "toEmail": "={{ $env.SEO_REPORT_RECIPIENTS || 'team@company.com' }}",
+        "subject": "Weekly SEO Report - {{ $json.period }}",
+        "contentType": "html",
+        "content": "",
+        "options": {
+          "templateId": "d-weekly-seo-report",
+          "dynamicTemplateData": "={{ $json }}"
+        }
+      },
+      "id": "send-email-report",
+      "name": "Send Email Report",
+      "type": "n8n-nodes-base.sendGrid",
+      "typeVersion": 1,
+      "position": [1350, 500],
+      "credentials": {
+        "sendGridApi": {
+          "id": "sendgrid-cred",
+          "name": "SendGrid API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Monday 9 AM": {
+      "main": [[
+        { "node": "Get Ranking Data", "type": "main", "index": 0 },
+        { "node": "Get Backlink Data", "type": "main", "index": 0 },
+        { "node": "Get Health Issues", "type": "main", "index": 0 }
+      ]]
+    },
+    "Get Ranking Data": {
+      "main": [[{ "node": "Compile Report", "type": "main", "index": 0 }]]
+    },
+    "Get Backlink Data": {
+      "main": [[{ "node": "Compile Report", "type": "main", "index": 0 }]]
+    },
+    "Get Health Issues": {
+      "main": [[{ "node": "Compile Report", "type": "main", "index": 0 }]]
+    },
+    "Compile Report": {
+      "main": [[{ "node": "Save Report Snapshot", "type": "main", "index": 0 }]]
+    },
+    "Save Report Snapshot": {
+      "main": [[
+        { "node": "Send Slack Report", "type": "main", "index": 0 },
+        { "node": "Send Email Report", "type": "main", "index": 0 }
+      ]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "Reporting" },
+    { "name": "SEO" },
+    { "name": "Weekly" }
+  ]
+}

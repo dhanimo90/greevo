@@ -1,0 +1,179 @@
+{
+  "name": "Marketing - Lead Nurture Campaign",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 9 * * 1-5" }]
+        }
+      },
+      "id": "schedule-weekdays",
+      "name": "Weekdays 9 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.*, (SELECT COUNT(*) FROM lead_activities la WHERE la.contact_id = c.id AND la.activity_type LIKE 'nurture_%') as nurture_step FROM contacts c WHERE c.lead_status IN ('new', 'contacted') AND c.lead_score BETWEEN 20 AND 70 AND c.created_at < NOW() - INTERVAL '7 days' AND NOT EXISTS ( SELECT 1 FROM lead_activities la WHERE la.contact_id = c.id AND la.activity_type LIKE 'nurture_%' AND la.created_at > NOW() - INTERVAL '5 days' ) ORDER BY c.lead_score DESC LIMIT 50",
+        "options": {}
+      },
+      "id": "get-nurture-candidates",
+      "name": "Get Nurture Candidates",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const contacts = $input.all();\nconst results = [];\n\n// Nurture content berdasarkan step\nconst nurtureSeries = [\n  {\n    step: 0,\n    subject: '5 Tips to Improve Your {{industry}} Strategy',\n    template: 'd-nurture-tips',\n    content_type: 'educational'\n  },\n  {\n    step: 1,\n    subject: 'Case Study: How {{similar_company}} Achieved 3x Growth',\n    template: 'd-nurture-case-study',\n    content_type: 'social_proof'\n  },\n  {\n    step: 2,\n    subject: '{{first_name}}, here\\'s a free resource for you',\n    template: 'd-nurture-resource',\n    content_type: 'value_add'\n  },\n  {\n    step: 3,\n    subject: 'Ready to take the next step, {{first_name}}?',\n    template: 'd-nurture-cta',\n    content_type: 'soft_cta'\n  },\n  {\n    step: 4,\n    subject: 'Let\\'s schedule a quick chat',\n    template: 'd-nurture-meeting',\n    content_type: 'hard_cta'\n  }\n];\n\nfor (const item of contacts) {\n  const contact = item.json;\n  const step = Math.min(contact.nurture_step || 0, nurtureSeries.length - 1);\n  const content = nurtureSeries[step];\n  \n  // Personalisasi subject\n  let subject = content.subject\n    .replace('{{first_name}}', contact.first_name || 'there')\n    .replace('{{industry}}', contact.custom_fields?.industry || 'Business')\n    .replace('{{similar_company}}', 'Industry Leaders');\n\n  results.push({\n    json: {\n      ...contact,\n      nurture_step: step,\n      email_subject: subject,\n      template_id: content.template,\n      content_type: content.content_type\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "determine-content",
+      "name": "Determine Content Step",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "marketing@{{ $env.COMPANY_DOMAIN }}",
+        "toEmail": "={{ $json.email }}",
+        "subject": "={{ $json.email_subject }}",
+        "contentType": "html",
+        "content": "",
+        "options": {
+          "templateId": "={{ $json.template_id }}",
+          "dynamicTemplateData": {
+            "first_name": "={{ $json.first_name }}",
+            "company": "={{ $json.company }}",
+            "content_type": "={{ $json.content_type }}"
+          }
+        }
+      },
+      "id": "send-nurture-email",
+      "name": "Send Nurture Email",
+      "type": "n8n-nodes-base.sendGrid",
+      "typeVersion": 1,
+      "position": [910, 300],
+      "credentials": {
+        "sendGridApi": {
+          "id": "sendgrid-cred",
+          "name": "SendGrid API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) VALUES ({{ $json.id }}, 'nurture_email_sent', '{\"step\": {{ $json.nurture_step }}, \"template\": \"{{ $json.template_id }}\", \"content_type\": \"{{ $json.content_type }}\"}', 3); UPDATE contacts SET lead_score = lead_score + 3 WHERE id = {{ $json.id }};",
+        "options": {}
+      },
+      "id": "log-and-score",
+      "name": "Log & Update Score",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.nurture_step }}",
+              "operation": "equal",
+              "value2": 4
+            }
+          ]
+        }
+      },
+      "id": "is-final-step",
+      "name": "Is Final Step?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1350, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#sales-leads",
+        "text": "📧 *Nurture Complete - Ready for Sales*\n\n*Contact:* {{ $json.first_name }} {{ $json.last_name }}\n*Company:* {{ $json.company }}\n*Email:* {{ $json.email }}\n*Score:* {{ $json.lead_score }}\n\nThis lead has completed the nurture series and is ready for direct outreach.",
+        "options": {}
+      },
+      "id": "notify-sales",
+      "name": "Notify Sales Team",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1570, 200],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE contacts SET lead_status = 'qualified' WHERE id = {{ $json.id }} AND lead_status != 'qualified'",
+        "options": {}
+      },
+      "id": "upgrade-status",
+      "name": "Upgrade to Qualified",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1570, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Weekdays 9 AM": {
+      "main": [[{ "node": "Get Nurture Candidates", "type": "main", "index": 0 }]]
+    },
+    "Get Nurture Candidates": {
+      "main": [[{ "node": "Determine Content Step", "type": "main", "index": 0 }]]
+    },
+    "Determine Content Step": {
+      "main": [[{ "node": "Send Nurture Email", "type": "main", "index": 0 }]]
+    },
+    "Send Nurture Email": {
+      "main": [[{ "node": "Log & Update Score", "type": "main", "index": 0 }]]
+    },
+    "Log & Update Score": {
+      "main": [[{ "node": "Is Final Step?", "type": "main", "index": 0 }]]
+    },
+    "Is Final Step?": {
+      "main": [
+        [
+          { "node": "Notify Sales Team", "type": "main", "index": 0 },
+          { "node": "Upgrade to Qualified", "type": "main", "index": 0 }
+        ],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "Marketing" },
+    { "name": "Nurture" },
+    { "name": "Email Automation" }
+  ]
+}

@@ -1,0 +1,198 @@
+{
+  "name": "Reporting - Monthly Marketing & CRM Report",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 9 1 * *" }]
+        }
+      },
+      "id": "monthly-1st",
+      "name": "1st of Month 9 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) as total_contacts, COUNT(*) FILTER (WHERE created_at > NOW() - INTERVAL '30 days') as new_contacts, COUNT(*) FILTER (WHERE lead_status = 'qualified') as qualified_leads, COUNT(*) FILTER (WHERE lead_status = 'customer') as customers, COUNT(*) FILTER (WHERE lead_status = 'lost') as lost, ROUND(AVG(lead_score)) as avg_lead_score, COUNT(*) FILTER (WHERE lead_score >= 80) as hot_leads FROM contacts",
+        "options": {}
+      },
+      "id": "get-crm-metrics",
+      "name": "Get CRM Metrics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 150],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT source, COUNT(*) as count, ROUND(AVG(lead_score)) as avg_score FROM contacts WHERE created_at > NOW() - INTERVAL '30 days' GROUP BY source ORDER BY count DESC",
+        "options": {}
+      },
+      "id": "get-source-breakdown",
+      "name": "Get Source Breakdown",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT activity_type, COUNT(*) as count FROM lead_activities WHERE created_at > NOW() - INTERVAL '30 days' GROUP BY activity_type ORDER BY count DESC",
+        "options": {}
+      },
+      "id": "get-activity-metrics",
+      "name": "Get Activity Metrics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 450],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) as total_deals, SUM(deal_value) as total_pipeline_value, COUNT(*) FILTER (WHERE stage = 'closed_won') as won_deals, SUM(deal_value) FILTER (WHERE stage = 'closed_won') as won_value, COUNT(*) FILTER (WHERE stage = 'closed_lost') as lost_deals, ROUND(COUNT(*) FILTER (WHERE stage = 'closed_won')::numeric / NULLIF(COUNT(*) FILTER (WHERE stage IN ('closed_won', 'closed_lost')), 0) * 100) as win_rate FROM deals WHERE created_at > NOW() - INTERVAL '30 days' OR updated_at > NOW() - INTERVAL '30 days'",
+        "options": {}
+      },
+      "id": "get-deal-metrics",
+      "name": "Get Deal Metrics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 600],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const crmMetrics = $node['Get CRM Metrics'].json;\nconst sourceBreakdown = $node['Get Source Breakdown'].json;\nconst activityMetrics = $node['Get Activity Metrics'].json;\nconst dealMetrics = $node['Get Deal Metrics'].json;\n\nconst crm = Array.isArray(crmMetrics) ? crmMetrics[0] : crmMetrics;\nconst sources = Array.isArray(sourceBreakdown) ? sourceBreakdown : [sourceBreakdown];\nconst activities = Array.isArray(activityMetrics) ? activityMetrics : [activityMetrics];\nconst deals = Array.isArray(dealMetrics) ? dealMetrics[0] : dealMetrics;\n\nconst month = new Date(Date.now() - 30*24*60*60*1000).toLocaleString('id-ID', { month: 'long', year: 'numeric' });\n\nconst report = {\n  period: month,\n  crm: {\n    total_contacts: crm?.total_contacts || 0,\n    new_contacts: crm?.new_contacts || 0,\n    qualified_leads: crm?.qualified_leads || 0,\n    customers: crm?.customers || 0,\n    lost: crm?.lost || 0,\n    avg_lead_score: crm?.avg_lead_score || 0,\n    hot_leads: crm?.hot_leads || 0,\n    conversion_rate: crm?.total_contacts > 0 \n      ? Math.round((crm?.customers || 0) / crm.total_contacts * 100) \n      : 0\n  },\n  sources: sources.filter(s => s.source).map(s => ({\n    source: s.source,\n    count: s.count,\n    avg_score: s.avg_score\n  })),\n  activities: activities.filter(a => a.activity_type).map(a => ({\n    type: a.activity_type,\n    count: a.count\n  })),\n  deals: {\n    total: deals?.total_deals || 0,\n    pipeline_value: deals?.total_pipeline_value || 0,\n    won: deals?.won_deals || 0,\n    won_value: deals?.won_value || 0,\n    lost: deals?.lost_deals || 0,\n    win_rate: deals?.win_rate || 0\n  }\n};\n\nreturn [{ json: report }];"
+      },
+      "id": "compile-monthly-report",
+      "name": "Compile Monthly Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO analytics_snapshots (report_type, period_start, period_end, metrics, source) VALUES ('monthly', (NOW() - INTERVAL '30 days')::date, NOW()::date, '{{ JSON.stringify($json) }}'::jsonb, 'marketing_crm')",
+        "options": {}
+      },
+      "id": "save-monthly-snapshot",
+      "name": "Save Monthly Snapshot",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#marketing-reports",
+        "text": "📊 *Monthly Marketing & CRM Report*\n📅 {{ $json.period }}\n\n━━━━━━━━━━━━━━━━━━━━\n👥 *CRM OVERVIEW*\n━━━━━━━━━━━━━━━━━━━━\n• Total Contacts: {{ $json.crm.total_contacts }}\n• New This Month: +{{ $json.crm.new_contacts }}\n• Qualified Leads: {{ $json.crm.qualified_leads }}\n• Hot Leads (Score≥80): {{ $json.crm.hot_leads }}\n• Customers: {{ $json.crm.customers }}\n• Conversion Rate: {{ $json.crm.conversion_rate }}%\n• Avg Lead Score: {{ $json.crm.avg_lead_score }}\n\n━━━━━━━━━━━━━━━━━━━━\n📈 *LEAD SOURCES*\n━━━━━━━━━━━━━━━━━━━━\n{{ $json.sources.map(s => `• ${s.source}: ${s.count} leads (avg score: ${s.avg_score})`).join('\\n') || '• No data' }}\n\n━━━━━━━━━━━━━━━━━━━━\n💰 *DEALS & REVENUE*\n━━━━━━━━━━━━━━━━━━━━\n• Active Deals: {{ $json.deals.total }}\n• Pipeline Value: Rp {{ Number($json.deals.pipeline_value).toLocaleString('id-ID') }}\n• Won: {{ $json.deals.won }} (Rp {{ Number($json.deals.won_value).toLocaleString('id-ID') }})\n• Lost: {{ $json.deals.lost }}\n• Win Rate: {{ $json.deals.win_rate }}%\n\n━━━━━━━━━━━━━━━━━━━━\n📧 *ENGAGEMENT ACTIVITIES*\n━━━━━━━━━━━━━━━━━━━━\n{{ $json.activities.map(a => `• ${a.type}: ${a.count}`).join('\\n') || '• No data' }}\n\n_Detailed report sent via email_",
+        "options": {}
+      },
+      "id": "send-monthly-slack",
+      "name": "Send Monthly Slack Report",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1350, 300],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "reports@{{ $env.COMPANY_DOMAIN }}",
+        "toEmail": "={{ $env.MARKETING_REPORT_RECIPIENTS || 'management@company.com' }}",
+        "subject": "Monthly Marketing Report - {{ $json.period }}",
+        "contentType": "html",
+        "content": "",
+        "options": {
+          "templateId": "d-monthly-marketing-report",
+          "dynamicTemplateData": "={{ $json }}"
+        }
+      },
+      "id": "send-monthly-email",
+      "name": "Send Monthly Email",
+      "type": "n8n-nodes-base.sendGrid",
+      "typeVersion": 1,
+      "position": [1350, 500],
+      "credentials": {
+        "sendGridApi": {
+          "id": "sendgrid-cred",
+          "name": "SendGrid API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "1st of Month 9 AM": {
+      "main": [[
+        { "node": "Get CRM Metrics", "type": "main", "index": 0 },
+        { "node": "Get Source Breakdown", "type": "main", "index": 0 },
+        { "node": "Get Activity Metrics", "type": "main", "index": 0 },
+        { "node": "Get Deal Metrics", "type": "main", "index": 0 }
+      ]]
+    },
+    "Get CRM Metrics": {
+      "main": [[{ "node": "Compile Monthly Report", "type": "main", "index": 0 }]]
+    },
+    "Get Source Breakdown": {
+      "main": [[{ "node": "Compile Monthly Report", "type": "main", "index": 0 }]]
+    },
+    "Get Activity Metrics": {
+      "main": [[{ "node": "Compile Monthly Report", "type": "main", "index": 0 }]]
+    },
+    "Get Deal Metrics": {
+      "main": [[{ "node": "Compile Monthly Report", "type": "main", "index": 0 }]]
+    },
+    "Compile Monthly Report": {
+      "main": [[{ "node": "Save Monthly Snapshot", "type": "main", "index": 0 }]]
+    },
+    "Save Monthly Snapshot": {
+      "main": [[
+        { "node": "Send Monthly Slack Report", "type": "main", "index": 0 },
+        { "node": "Send Monthly Email", "type": "main", "index": 0 }
+      ]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "Reporting" },
+    { "name": "Marketing" },
+    { "name": "Monthly" }
+  ]
+}

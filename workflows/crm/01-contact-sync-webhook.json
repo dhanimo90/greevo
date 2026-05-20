@@ -1,0 +1,245 @@
+{
+  "name": "CRM - Contact Sync via Webhook",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "contact-sync",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook - Receive Contact",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.email }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "validate-email",
+      "name": "Validate Email",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, lead_score, lead_status FROM contacts WHERE email = '{{ $json.email }}' LIMIT 1",
+        "options": {}
+      },
+      "id": "check-existing",
+      "name": "Check Existing Contact",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 250],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.id }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "contact-exists",
+      "name": "Contact Exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [910, 250]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE contacts SET first_name = '{{ $node[\"Webhook - Receive Contact\"].json.first_name }}', last_name = '{{ $node[\"Webhook - Receive Contact\"].json.last_name }}', company = '{{ $node[\"Webhook - Receive Contact\"].json.company }}', phone = '{{ $node[\"Webhook - Receive Contact\"].json.phone }}', custom_fields = custom_fields || '{{ JSON.stringify($node[\"Webhook - Receive Contact\"].json.custom_fields || {}) }}'::jsonb, updated_at = NOW() WHERE email = '{{ $node[\"Webhook - Receive Contact\"].json.email }}' RETURNING *",
+        "options": {}
+      },
+      "id": "update-contact",
+      "name": "Update Contact",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 150],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO contacts (email, first_name, last_name, company, job_title, phone, source, tags, custom_fields) VALUES ('{{ $node[\"Webhook - Receive Contact\"].json.email }}', '{{ $node[\"Webhook - Receive Contact\"].json.first_name }}', '{{ $node[\"Webhook - Receive Contact\"].json.last_name }}', '{{ $node[\"Webhook - Receive Contact\"].json.company }}', '{{ $node[\"Webhook - Receive Contact\"].json.job_title }}', '{{ $node[\"Webhook - Receive Contact\"].json.phone }}', '{{ $node[\"Webhook - Receive Contact\"].json.source || \"website\" }}', ARRAY[{{ ($node[\"Webhook - Receive Contact\"].json.tags || []).map(t => \"'\" + t + \"'\").join(',') }}], '{{ JSON.stringify($node[\"Webhook - Receive Contact\"].json.custom_fields || {}) }}'::jsonb) RETURNING *",
+        "options": {}
+      },
+      "id": "create-contact",
+      "name": "Create Contact",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 350],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) VALUES ({{ $json.id }}, 'contact_created', '{\"source\": \"{{ $node[\"Webhook - Receive Contact\"].json.source || \"website\" }}\"}', 10)",
+        "options": {}
+      },
+      "id": "log-activity",
+      "name": "Log Activity",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1350, 350],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const contact = $input.first().json;\nconst baseScore = 10;\nlet score = baseScore;\n\n// Score berdasarkan kelengkapan data\nif (contact.company) score += 5;\nif (contact.job_title) score += 5;\nif (contact.phone) score += 3;\n\n// Score berdasarkan source\nconst sourceScores = {\n  'website': 10,\n  'referral': 15,\n  'social': 5,\n  'email': 8,\n  'event': 12\n};\nscore += sourceScores[contact.source] || 0;\n\nreturn [{ json: { ...contact, calculated_score: score } }];"
+      },
+      "id": "calculate-score",
+      "name": "Calculate Lead Score",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1350, 150]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE contacts SET lead_score = lead_score + {{ $json.calculated_score }} WHERE id = {{ $json.id }}",
+        "options": {}
+      },
+      "id": "update-score",
+      "name": "Update Lead Score",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1570, 150],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#sales-leads",
+        "text": "🆕 *New Lead*\n*Name:* {{ $node[\"Webhook - Receive Contact\"].json.first_name }} {{ $node[\"Webhook - Receive Contact\"].json.last_name }}\n*Company:* {{ $node[\"Webhook - Receive Contact\"].json.company }}\n*Email:* {{ $node[\"Webhook - Receive Contact\"].json.email }}\n*Source:* {{ $node[\"Webhook - Receive Contact\"].json.source }}",
+        "options": {}
+      },
+      "id": "notify-slack",
+      "name": "Notify Slack",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1570, 350],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, message: 'Contact synced successfully' }) }}"
+      },
+      "id": "response-success",
+      "name": "Response Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1790, 250]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: false, message: 'Invalid email address' }) }}",
+        "options": {
+          "responseCode": 400
+        }
+      },
+      "id": "response-error",
+      "name": "Response Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [690, 450]
+    }
+  ],
+  "connections": {
+    "Webhook - Receive Contact": {
+      "main": [[{ "node": "Validate Email", "type": "main", "index": 0 }]]
+    },
+    "Validate Email": {
+      "main": [
+        [{ "node": "Check Existing Contact", "type": "main", "index": 0 }],
+        [{ "node": "Response Error", "type": "main", "index": 0 }]
+      ]
+    },
+    "Check Existing Contact": {
+      "main": [[{ "node": "Contact Exists?", "type": "main", "index": 0 }]]
+    },
+    "Contact Exists?": {
+      "main": [
+        [{ "node": "Update Contact", "type": "main", "index": 0 }],
+        [{ "node": "Create Contact", "type": "main", "index": 0 }]
+      ]
+    },
+    "Update Contact": {
+      "main": [[{ "node": "Calculate Lead Score", "type": "main", "index": 0 }]]
+    },
+    "Create Contact": {
+      "main": [
+        [{ "node": "Log Activity", "type": "main", "index": 0 }]
+      ]
+    },
+    "Log Activity": {
+      "main": [[{ "node": "Notify Slack", "type": "main", "index": 0 }]]
+    },
+    "Calculate Lead Score": {
+      "main": [[{ "node": "Update Lead Score", "type": "main", "index": 0 }]]
+    },
+    "Update Lead Score": {
+      "main": [[{ "node": "Response Success", "type": "main", "index": 0 }]]
+    },
+    "Notify Slack": {
+      "main": [[{ "node": "Response Success", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "CRM" },
+    { "name": "Contact Sync" },
+    { "name": "Production" }
+  ]
+}

@@ -1,0 +1,258 @@
+{
+  "name": "SEO - Backlink Monitor & Alert",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 7 * * *" }]
+        }
+      },
+      "id": "daily-7am",
+      "name": "Daily 7 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.ahrefs.com/v3/site-explorer/backlinks",
+        "method": "GET",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "target", "value": "={{ $env.COMPANY_DOMAIN }}" },
+            { "name": "mode", "value": "subdomains" },
+            { "name": "limit", "value": "100" },
+            { "name": "order_by", "value": "first_seen:desc" },
+            { "name": "where", "value": "first_seen > {{ new Date(Date.now() - 24*60*60*1000).toISOString().split('T')[0] }}" }
+          ]
+        },
+        "options": { "timeout": 60000 }
+      },
+      "id": "get-new-backlinks",
+      "name": "Get New Backlinks",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [470, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ahrefs-cred",
+          "name": "Ahrefs API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT source_url, target_url, anchor_text, domain_rating FROM backlinks WHERE is_active = true ORDER BY first_seen DESC LIMIT 500",
+        "options": {}
+      },
+      "id": "get-existing-backlinks",
+      "name": "Get Existing Backlinks",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const apiResponse = $input.first().json;\nconst backlinks = apiResponse.backlinks || apiResponse.results || [];\nconst results = [];\n\nfor (const bl of backlinks) {\n  results.push({\n    json: {\n      source_url: bl.url_from || bl.source_url,\n      target_url: bl.url_to || bl.target_url,\n      anchor_text: bl.anchor || bl.anchor_text,\n      domain_rating: bl.domain_rating || bl.dr || 0,\n      is_dofollow: bl.type !== 'nofollow',\n      is_new: true,\n      first_seen: bl.first_seen || new Date().toISOString()\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "parse-new-backlinks",
+      "name": "Parse New Backlinks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO backlinks (source_url, target_url, anchor_text, domain_rating, is_dofollow, first_seen) VALUES ('{{ $json.source_url }}', '{{ $json.target_url }}', '{{ $json.anchor_text }}', {{ $json.domain_rating }}, {{ $json.is_dofollow }}, '{{ $json.first_seen }}') ON CONFLICT DO NOTHING",
+        "options": {}
+      },
+      "id": "save-new-backlinks",
+      "name": "Save New Backlinks",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.domain_rating }}",
+              "operation": "largerEqual",
+              "value2": 40
+            }
+          ]
+        }
+      },
+      "id": "high-quality",
+      "name": "High Quality (DR>=40)?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1130, 200]
+    },
+    {
+      "parameters": {
+        "channel": "#seo-wins",
+        "text": "🔗 *New High-Quality Backlink!*\n\n*From:* {{ $json.source_url }}\n*To:* {{ $json.target_url }}\n*Anchor:* {{ $json.anchor_text }}\n*Domain Rating:* {{ $json.domain_rating }}\n*Type:* {{ $json.is_dofollow ? 'DoFollow ✅' : 'NoFollow' }}",
+        "options": {}
+      },
+      "id": "notify-new-backlink",
+      "name": "Notify New Backlink",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1350, 100],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "// Check for lost backlinks\nconst existingBacklinks = $node['Get Existing Backlinks'].json || [];\nconst results = [];\n\n// Sample check - in production, batch check URLs\nconst samplesToCheck = Array.isArray(existingBacklinks) ? existingBacklinks.slice(0, 20) : [];\n\nfor (const bl of samplesToCheck) {\n  results.push({\n    json: {\n      source_url: bl.source_url,\n      target_url: bl.target_url,\n      domain_rating: bl.domain_rating,\n      check_url: bl.source_url\n    }\n  });\n}\n\nreturn results.length > 0 ? results : [{ json: { skip: true } }];"
+      },
+      "id": "prepare-lost-check",
+      "name": "Prepare Lost Check",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 400]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.check_url }}",
+        "method": "GET",
+        "options": {
+          "timeout": 10000,
+          "redirect": { "redirect": { "followRedirects": true } }
+        }
+      },
+      "id": "check-backlink-alive",
+      "name": "Check Backlink Alive",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [910, 400],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.statusCode }}",
+              "operation": "largerEqual",
+              "value2": 400
+            }
+          ]
+        }
+      },
+      "id": "backlink-lost",
+      "name": "Backlink Lost?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1130, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE backlinks SET is_active = false, last_checked = NOW() WHERE source_url = '{{ $json.source_url }}' AND target_url = '{{ $json.target_url }}'",
+        "options": {}
+      },
+      "id": "mark-lost",
+      "name": "Mark as Lost",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1350, 350],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#seo-alerts",
+        "text": "⚠️ *Backlink Lost*\n\n*From:* {{ $json.source_url }}\n*To:* {{ $json.target_url }}\n*DR:* {{ $json.domain_rating }}\n\nConsider reaching out to recover this link.",
+        "options": {}
+      },
+      "id": "alert-lost-backlink",
+      "name": "Alert Lost Backlink",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1570, 350],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 7 AM": {
+      "main": [[
+        { "node": "Get New Backlinks", "type": "main", "index": 0 },
+        { "node": "Get Existing Backlinks", "type": "main", "index": 0 }
+      ]]
+    },
+    "Get New Backlinks": {
+      "main": [[{ "node": "Parse New Backlinks", "type": "main", "index": 0 }]]
+    },
+    "Parse New Backlinks": {
+      "main": [[{ "node": "Save New Backlinks", "type": "main", "index": 0 }]]
+    },
+    "Save New Backlinks": {
+      "main": [[{ "node": "High Quality (DR>=40)?", "type": "main", "index": 0 }]]
+    },
+    "High Quality (DR>=40)?": {
+      "main": [
+        [{ "node": "Notify New Backlink", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Get Existing Backlinks": {
+      "main": [[{ "node": "Prepare Lost Check", "type": "main", "index": 0 }]]
+    },
+    "Prepare Lost Check": {
+      "main": [[{ "node": "Check Backlink Alive", "type": "main", "index": 0 }]]
+    },
+    "Check Backlink Alive": {
+      "main": [[{ "node": "Backlink Lost?", "type": "main", "index": 0 }]]
+    },
+    "Backlink Lost?": {
+      "main": [
+        [{ "node": "Mark as Lost", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Mark as Lost": {
+      "main": [[{ "node": "Alert Lost Backlink", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "SEO" },
+    { "name": "Backlinks" },
+    { "name": "Monitoring" }
+  ]
+}

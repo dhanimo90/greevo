@@ -1,0 +1,176 @@
+{
+  "name": "SEO - Daily Keyword Rank Tracker",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 6 * * *" }]
+        }
+      },
+      "id": "daily-6am",
+      "name": "Daily 6 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT tk.id, tk.keyword, tk.target_url, tk.search_engine, tk.country, tk.client_id, (SELECT kr.position FROM keyword_rankings kr WHERE kr.keyword_id = tk.id ORDER BY kr.checked_at DESC LIMIT 1) as previous_position FROM tracked_keywords tk WHERE tk.is_active = true ORDER BY tk.id",
+        "options": {}
+      },
+      "id": "get-keywords",
+      "name": "Get Tracked Keywords",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 10,
+        "options": {}
+      },
+      "id": "batch-keywords",
+      "name": "Batch Keywords",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.ahrefs.com/v3/serp-overview",
+        "method": "GET",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "target", "value": "={{ $json.keyword }}" },
+            { "name": "country", "value": "={{ $json.country || 'id' }}" },
+            { "name": "limit", "value": "100" }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "check-ranking-ahrefs",
+      "name": "Check Ranking (Ahrefs)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [910, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ahrefs-cred",
+          "name": "Ahrefs API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const data = item.json;\n  const serpResults = data.serp || data.positions || [];\n  const keyword = $node['Batch Keywords'].json;\n  \n  // Cari posisi domain kita di SERP\n  let position = null;\n  let urlRanked = null;\n  \n  for (let i = 0; i < serpResults.length; i++) {\n    const result = serpResults[i];\n    if (result.url && result.url.includes(keyword.target_url?.replace(/https?:\\/\\//, '').split('/')[0])) {\n      position = i + 1;\n      urlRanked = result.url;\n      break;\n    }\n  }\n\n  const previousPosition = keyword.previous_position;\n  let positionChange = null;\n  if (position && previousPosition) {\n    positionChange = previousPosition - position; // positive = improved\n  }\n\n  results.push({\n    json: {\n      keyword_id: keyword.id,\n      keyword: keyword.keyword,\n      position: position,\n      previous_position: previousPosition,\n      position_change: positionChange,\n      url_ranked: urlRanked,\n      search_volume: data.search_volume || null,\n      cpc: data.cpc || null,\n      competition: data.competition || null,\n      is_significant_change: Math.abs(positionChange || 0) >= 5\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "parse-rankings",
+      "name": "Parse Rankings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1130, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO keyword_rankings (keyword_id, position, previous_position, url_ranked, search_volume, cpc, competition) VALUES ({{ $json.keyword_id }}, {{ $json.position || 'NULL' }}, {{ $json.previous_position || 'NULL' }}, {{ $json.url_ranked ? \"'\" + $json.url_ranked + \"'\" : 'NULL' }}, {{ $json.search_volume || 'NULL' }}, {{ $json.cpc || 'NULL' }}, {{ $json.competition || 'NULL' }})",
+        "options": {}
+      },
+      "id": "save-ranking",
+      "name": "Save Ranking",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1350, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.is_significant_change }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "significant-change",
+      "name": "Significant Change?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1570, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#seo-alerts",
+        "text": "={{ $json.position_change > 0 ? '📈' : '📉' }} *Keyword Ranking {{ $json.position_change > 0 ? 'Improved' : 'Dropped' }}*\n\n*Keyword:* {{ $json.keyword }}\n*Position:* {{ $json.previous_position }} → {{ $json.position }}\n*Change:* {{ $json.position_change > 0 ? '+' : '' }}{{ $json.position_change }} positions\n*URL:* {{ $json.url_ranked || 'Not ranking' }}",
+        "options": {}
+      },
+      "id": "alert-ranking-change",
+      "name": "Alert Ranking Change",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1790, 200],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 6 AM": {
+      "main": [[{ "node": "Get Tracked Keywords", "type": "main", "index": 0 }]]
+    },
+    "Get Tracked Keywords": {
+      "main": [[{ "node": "Batch Keywords", "type": "main", "index": 0 }]]
+    },
+    "Batch Keywords": {
+      "main": [[{ "node": "Check Ranking (Ahrefs)", "type": "main", "index": 0 }]]
+    },
+    "Check Ranking (Ahrefs)": {
+      "main": [[{ "node": "Parse Rankings", "type": "main", "index": 0 }]]
+    },
+    "Parse Rankings": {
+      "main": [[{ "node": "Save Ranking", "type": "main", "index": 0 }]]
+    },
+    "Save Ranking": {
+      "main": [[{ "node": "Significant Change?", "type": "main", "index": 0 }]]
+    },
+    "Significant Change?": {
+      "main": [
+        [{ "node": "Alert Ranking Change", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Alert Ranking Change": {
+      "main": [[{ "node": "Batch Keywords", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "SEO" },
+    { "name": "Keywords" },
+    { "name": "Daily" }
+  ]
+}

@@ -1,0 +1,30 @@
+# Environment files
+.env
+docker/.env
+
+# Docker volumes
+docker/data/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+
+# Node modules (jika ada scripts tambahan)
+node_modules/
+
+# Secrets
+*.pem
+*.key
+service-account*.json

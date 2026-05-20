@@ -1,0 +1,170 @@
+{
+  "name": "CRM - Lead Scoring Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "hours", "hoursInterval": 1 }]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Every Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.id, c.email, c.lead_score, c.lead_status, c.company, c.created_at, COUNT(la.id) as activity_count, MAX(la.created_at) as last_activity FROM contacts c LEFT JOIN lead_activities la ON c.id = la.contact_id WHERE c.lead_status NOT IN ('customer', 'lost') AND c.updated_at > NOW() - INTERVAL '2 hours' GROUP BY c.id ORDER BY c.lead_score DESC",
+        "options": {}
+      },
+      "id": "get-active-contacts",
+      "name": "Get Active Contacts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const contacts = $input.all();\nconst results = [];\n\nfor (const item of contacts) {\n  const contact = item.json;\n  let newScore = contact.lead_score || 0;\n  let newStatus = contact.lead_status;\n  let isHotLead = false;\n\n  // Decay score jika tidak ada aktivitas > 7 hari\n  const lastActivity = new Date(contact.last_activity);\n  const daysSinceActivity = (Date.now() - lastActivity.getTime()) / (1000 * 60 * 60 * 24);\n  \n  if (daysSinceActivity > 7) {\n    newScore = Math.max(0, newScore - 5);\n  }\n  if (daysSinceActivity > 30) {\n    newScore = Math.max(0, newScore - 15);\n  }\n\n  // Update status berdasarkan score\n  if (newScore >= 80) {\n    newStatus = 'qualified';\n    isHotLead = true;\n  } else if (newScore >= 50) {\n    newStatus = 'contacted';\n  } else if (newScore >= 20) {\n    newStatus = 'new';\n  }\n\n  // Bonus score berdasarkan engagement frequency\n  if (contact.activity_count > 10) newScore += 10;\n  else if (contact.activity_count > 5) newScore += 5;\n\n  results.push({\n    json: {\n      ...contact,\n      new_score: newScore,\n      new_status: newStatus,\n      is_hot_lead: isHotLead,\n      score_changed: newScore !== contact.lead_score,\n      status_changed: newStatus !== contact.lead_status\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "recalculate-scores",
+      "name": "Recalculate Scores",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.score_changed }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "score-changed",
+      "name": "Score Changed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE contacts SET lead_score = {{ $json.new_score }}, lead_status = '{{ $json.new_status }}' WHERE id = {{ $json.id }}",
+        "options": {}
+      },
+      "id": "update-scores",
+      "name": "Update Scores in DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 250],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.is_hot_lead }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "is-hot-lead",
+      "name": "Is Hot Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1350, 250]
+    },
+    {
+      "parameters": {
+        "channel": "#sales-hot-leads",
+        "text": "🔥 *HOT LEAD ALERT*\n\n*Contact:* {{ $json.email }}\n*Company:* {{ $json.company }}\n*Score:* {{ $json.new_score }}/100\n*Status:* {{ $json.new_status }}\n*Activities:* {{ $json.activity_count }}\n\nThis lead is ready for direct outreach!",
+        "options": {}
+      },
+      "id": "alert-hot-lead",
+      "name": "Alert Hot Lead",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1570, 150],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) VALUES ({{ $json.id }}, 'score_update', '{\"old_score\": {{ $json.lead_score }}, \"new_score\": {{ $json.new_score }}, \"reason\": \"automated_recalculation\"}', {{ $json.new_score - $json.lead_score }})",
+        "options": {}
+      },
+      "id": "log-score-change",
+      "name": "Log Score Change",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1570, 350],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every Hour": {
+      "main": [[{ "node": "Get Active Contacts", "type": "main", "index": 0 }]]
+    },
+    "Get Active Contacts": {
+      "main": [[{ "node": "Recalculate Scores", "type": "main", "index": 0 }]]
+    },
+    "Recalculate Scores": {
+      "main": [[{ "node": "Score Changed?", "type": "main", "index": 0 }]]
+    },
+    "Score Changed?": {
+      "main": [
+        [{ "node": "Update Scores in DB", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Update Scores in DB": {
+      "main": [[{ "node": "Is Hot Lead?", "type": "main", "index": 0 }]]
+    },
+    "Is Hot Lead?": {
+      "main": [
+        [{ "node": "Alert Hot Lead", "type": "main", "index": 0 }],
+        [{ "node": "Log Score Change", "type": "main", "index": 0 }]
+      ]
+    },
+    "Alert Hot Lead": {
+      "main": [[{ "node": "Log Score Change", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "CRM" },
+    { "name": "Lead Scoring" },
+    { "name": "Automation" }
+  ]
+}
