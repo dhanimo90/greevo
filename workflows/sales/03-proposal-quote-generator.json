@@ -1,0 +1,152 @@
+{
+  "name": "Sales - Proposal & Quote Generator",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sales/generate-proposal",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-proposal",
+      "name": "Webhook - Generate Proposal",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\n\nconst proposalId = `PROP-${Date.now().toString(36).toUpperCase()}`;\nconst now = new Date();\nconst validUntil = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000); // 30 days\n\n// Calculate totals\nconst lineItems = body.line_items || [];\nconst subtotal = lineItems.reduce((sum, item) => sum + (item.quantity * item.unit_price), 0);\nconst discount = body.discount_percent ? subtotal * body.discount_percent / 100 : (body.discount_amount || 0);\nconst taxRate = body.tax_rate || 11; // PPN 11%\nconst taxAmount = (subtotal - discount) * taxRate / 100;\nconst total = subtotal - discount + taxAmount;\n\nreturn [{\n  json: {\n    proposal_id: proposalId,\n    deal_id: body.deal_id,\n    client_id: body.client_id,\n    contact_email: body.contact_email,\n    contact_name: body.contact_name,\n    company_name: body.company_name,\n    \n    // Proposal details\n    title: body.title || `Proposal for ${body.company_name}`,\n    description: body.description || '',\n    line_items: lineItems.map(item => ({\n      ...item,\n      total: item.quantity * item.unit_price\n    })),\n    \n    // Financials\n    currency: body.currency || 'IDR',\n    subtotal: subtotal,\n    discount: discount,\n    discount_percent: body.discount_percent || 0,\n    tax_rate: taxRate,\n    tax_amount: taxAmount,\n    total: total,\n    \n    // Terms\n    payment_terms: body.payment_terms || 'Net 30',\n    valid_until: validUntil.toISOString().split('T')[0],\n    terms_conditions: body.terms || 'Standard terms and conditions apply.',\n    \n    // Meta\n    created_at: now.toISOString(),\n    created_by: body.created_by || 'system',\n    status: 'draft'\n  }\n}];"
+      },
+      "id": "build-proposal",
+      "name": "Build Proposal",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO proposals (proposal_id, deal_id, client_id, contact_email, company_name, title, line_items, subtotal, discount, tax_amount, total, currency, payment_terms, valid_until, status, created_by) VALUES ('{{ $json.proposal_id }}', {{ $json.deal_id || 'NULL' }}, {{ $json.client_id || 'NULL' }}, '{{ $json.contact_email }}', '{{ $json.company_name }}', '{{ $json.title }}', '{{ JSON.stringify($json.line_items) }}'::jsonb, {{ $json.subtotal }}, {{ $json.discount }}, {{ $json.tax_amount }}, {{ $json.total }}, '{{ $json.currency }}', '{{ $json.payment_terms }}', '{{ $json.valid_until }}', 'sent', '{{ $json.created_by }}') RETURNING *",
+        "options": {}
+      },
+      "id": "save-proposal",
+      "name": "Save Proposal",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "sales@{{ $env.COMPANY_DOMAIN }}",
+        "toEmail": "={{ $json.contact_email }}",
+        "subject": "Proposal: {{ $json.title }} ({{ $json.proposal_id }})",
+        "contentType": "html",
+        "content": "",
+        "options": {
+          "templateId": "d-proposal-template",
+          "dynamicTemplateData": {
+            "proposal_id": "={{ $json.proposal_id }}",
+            "contact_name": "={{ $json.contact_name }}",
+            "company_name": "={{ $json.company_name }}",
+            "title": "={{ $json.title }}",
+            "line_items": "={{ $json.line_items }}",
+            "subtotal": "={{ $json.subtotal }}",
+            "discount": "={{ $json.discount }}",
+            "tax_amount": "={{ $json.tax_amount }}",
+            "total": "={{ $json.total }}",
+            "currency": "={{ $json.currency }}",
+            "valid_until": "={{ $json.valid_until }}",
+            "payment_terms": "={{ $json.payment_terms }}"
+          }
+        }
+      },
+      "id": "send-proposal",
+      "name": "Send Proposal Email",
+      "type": "n8n-nodes-base.sendGrid",
+      "typeVersion": 1,
+      "position": [910, 300],
+      "credentials": {
+        "sendGridApi": {
+          "id": "sendgrid-cred",
+          "name": "SendGrid API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE deals SET stage = 'proposal', probability = 40, deal_value = {{ $json.total }}, updated_at = NOW() WHERE id = {{ $json.deal_id || 0 }} AND stage IN ('prospecting', 'qualification'); INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) SELECT d.contact_id, 'proposal_sent', '{\"proposal_id\": \"{{ $json.proposal_id }}\", \"value\": {{ $json.total }}}'::jsonb, 10 FROM deals d WHERE d.id = {{ $json.deal_id || 0 }};",
+        "options": {}
+      },
+      "id": "update-deal",
+      "name": "Update Deal Stage",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#sales-pipeline",
+        "text": "📄 *Proposal Sent*\n\n*ID:* {{ $json.proposal_id }}\n*To:* {{ $json.contact_name }} ({{ $json.company_name }})\n*Title:* {{ $json.title }}\n*Value:* {{ $json.currency }} {{ Number($json.total).toLocaleString('id-ID') }}\n*Valid Until:* {{ $json.valid_until }}\n*Items:* {{ $json.line_items.length }}\n*Created By:* {{ $json.created_by }}",
+        "options": {}
+      },
+      "id": "notify-proposal",
+      "name": "Notify Proposal Sent",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1350, 300],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, proposal_id: $json.proposal_id, total: $json.total, valid_until: $json.valid_until }) }}"
+      },
+      "id": "response-ok",
+      "name": "Response OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1570, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Generate Proposal": {
+      "main": [[{ "node": "Build Proposal", "type": "main", "index": 0 }]]
+    },
+    "Build Proposal": {
+      "main": [[{ "node": "Save Proposal", "type": "main", "index": 0 }]]
+    },
+    "Save Proposal": {
+      "main": [[{ "node": "Send Proposal Email", "type": "main", "index": 0 }]]
+    },
+    "Send Proposal Email": {
+      "main": [[{ "node": "Update Deal Stage", "type": "main", "index": 0 }]]
+    },
+    "Update Deal Stage": {
+      "main": [[{ "node": "Notify Proposal Sent", "type": "main", "index": 0 }]]
+    },
+    "Notify Proposal Sent": {
+      "main": [[{ "node": "Response OK", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Sales" }, { "name": "Proposals" }, { "name": "Revenue" }]
+}

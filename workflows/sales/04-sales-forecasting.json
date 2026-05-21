@@ -1,0 +1,143 @@
+{
+  "name": "Sales - Forecasting & Pipeline Report",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 8 * * 1" }]
+        }
+      },
+      "id": "weekly-monday",
+      "name": "Monday 8 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT d.stage, COUNT(*) as deal_count, SUM(d.deal_value) as total_value, AVG(d.probability) as avg_probability, SUM(d.deal_value * d.probability / 100) as weighted_value FROM deals d WHERE d.stage NOT IN ('closed_won', 'closed_lost') GROUP BY d.stage ORDER BY CASE d.stage WHEN 'prospecting' THEN 1 WHEN 'qualification' THEN 2 WHEN 'proposal' THEN 3 WHEN 'negotiation' THEN 4 END",
+        "options": {}
+      },
+      "id": "get-pipeline",
+      "name": "Get Pipeline Summary",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) as won_count, COALESCE(SUM(deal_value), 0) as won_value FROM deals WHERE stage = 'closed_won' AND updated_at > date_trunc('month', NOW()); SELECT COUNT(*) as lost_count, COALESCE(SUM(deal_value), 0) as lost_value FROM deals WHERE stage = 'closed_lost' AND updated_at > date_trunc('month', NOW()); SELECT AVG(EXTRACT(DAY FROM (updated_at - created_at))) as avg_cycle_days FROM deals WHERE stage = 'closed_won' AND updated_at > NOW() - INTERVAL '90 days';",
+        "options": {}
+      },
+      "id": "get-win-loss",
+      "name": "Get Win/Loss Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT d.assigned_to, COUNT(*) as deal_count, SUM(d.deal_value) as total_value, COUNT(*) FILTER (WHERE d.stage = 'closed_won') as won, COUNT(*) FILTER (WHERE d.stage = 'closed_lost') as lost FROM deals d WHERE d.updated_at > NOW() - INTERVAL '30 days' AND d.assigned_to IS NOT NULL GROUP BY d.assigned_to ORDER BY total_value DESC",
+        "options": {}
+      },
+      "id": "get-rep-performance",
+      "name": "Get Rep Performance",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 600],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const pipeline = $node['Get Pipeline Summary'].json;\nconst winLoss = $node['Get Win/Loss Data'].json;\nconst repPerf = $node['Get Rep Performance'].json;\n\nconst pipelineData = Array.isArray(pipeline) ? pipeline : (pipeline?.stage ? [pipeline] : []);\nconst reps = Array.isArray(repPerf) ? repPerf : (repPerf?.assigned_to ? [repPerf] : []);\n\n// Pipeline totals\nconst totalPipeline = pipelineData.reduce((sum, s) => sum + (parseFloat(s.total_value) || 0), 0);\nconst weightedForecast = pipelineData.reduce((sum, s) => sum + (parseFloat(s.weighted_value) || 0), 0);\nconst totalDeals = pipelineData.reduce((sum, s) => sum + (parseInt(s.deal_count) || 0), 0);\n\n// Win/loss\nconst wonCount = parseInt(winLoss?.won_count) || 0;\nconst wonValue = parseFloat(winLoss?.won_value) || 0;\nconst lostCount = parseInt(winLoss?.lost_count) || 0;\nconst winRate = (wonCount + lostCount) > 0 ? Math.round(wonCount / (wonCount + lostCount) * 100) : 0;\nconst avgCycle = Math.round(parseFloat(winLoss?.avg_cycle_days) || 0);\n\n// Forecast: weighted pipeline + historical win rate adjustment\nconst adjustedForecast = weightedForecast * (winRate / 100 || 0.3);\n\n// Monthly target (configurable)\nconst monthlyTarget = parseFloat($env.MONTHLY_REVENUE_TARGET) || 500000000; // 500M IDR default\nconst targetProgress = wonValue / monthlyTarget * 100;\n\nreturn [{\n  json: {\n    period: new Date().toLocaleString('id-ID', { month: 'long', year: 'numeric' }),\n    pipeline: {\n      total_deals: totalDeals,\n      total_value: totalPipeline,\n      weighted_forecast: weightedForecast,\n      by_stage: pipelineData.map(s => ({\n        stage: s.stage,\n        deals: parseInt(s.deal_count),\n        value: parseFloat(s.total_value),\n        avg_probability: Math.round(parseFloat(s.avg_probability))\n      }))\n    },\n    performance: {\n      won_this_month: wonCount,\n      won_value: wonValue,\n      lost_this_month: lostCount,\n      win_rate: winRate,\n      avg_sales_cycle_days: avgCycle\n    },\n    forecast: {\n      weighted_pipeline: weightedForecast,\n      adjusted_forecast: adjustedForecast,\n      monthly_target: monthlyTarget,\n      target_progress_percent: Math.round(targetProgress),\n      gap_to_target: Math.max(0, monthlyTarget - wonValue)\n    },\n    reps: reps.map(r => ({\n      name: r.assigned_to,\n      deals: parseInt(r.deal_count),\n      value: parseFloat(r.total_value),\n      won: parseInt(r.won),\n      lost: parseInt(r.lost)\n    }))\n  }\n}];"
+      },
+      "id": "build-forecast",
+      "name": "Build Forecast",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO analytics_snapshots (report_type, period_start, period_end, metrics, source) VALUES ('weekly', CURRENT_DATE - 7, CURRENT_DATE, '{{ JSON.stringify($json) }}'::jsonb, 'sales_forecast')",
+        "options": {}
+      },
+      "id": "save-forecast",
+      "name": "Save Forecast",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#sales-reports",
+        "text": "📊 *Weekly Sales Forecast*\n📅 {{ $json.period }}\n\n━━━━━━━━━━━━━━━━━━━━\n💰 *PIPELINE*\n━━━━━━━━━━━━━━━━━━━━\n• Active Deals: {{ $json.pipeline.total_deals }}\n• Total Value: Rp {{ Number($json.pipeline.total_value).toLocaleString('id-ID') }}\n• Weighted Forecast: Rp {{ Number($json.pipeline.weighted_forecast).toLocaleString('id-ID') }}\n\n*By Stage:*\n{{ $json.pipeline.by_stage.map(s => `• ${s.stage}: ${s.deals} deals | Rp ${Number(s.value).toLocaleString('id-ID')} | ${s.avg_probability}% prob`).join('\\n') }}\n\n━━━━━━━━━━━━━━━━━━━━\n🎯 *TARGET PROGRESS*\n━━━━━━━━━━━━━━━━━━━━\n• Monthly Target: Rp {{ Number($json.forecast.monthly_target).toLocaleString('id-ID') }}\n• Won This Month: Rp {{ Number($json.performance.won_value).toLocaleString('id-ID') }} ({{ $json.forecast.target_progress_percent }}%)\n• Gap: Rp {{ Number($json.forecast.gap_to_target).toLocaleString('id-ID') }}\n• Adjusted Forecast: Rp {{ Number($json.forecast.adjusted_forecast).toLocaleString('id-ID') }}\n\n━━━━━━━━━━━━━━━━━━━━\n📈 *PERFORMANCE*\n━━━━━━━━━━━━━━━━━━━━\n• Win Rate: {{ $json.performance.win_rate }}%\n• Avg Sales Cycle: {{ $json.performance.avg_sales_cycle_days }} days\n• Won: {{ $json.performance.won_this_month }} | Lost: {{ $json.performance.lost_this_month }}\n\n{{ $json.reps.length > 0 ? '━━━━━━━━━━━━━━━━━━━━\\n👥 *REP LEADERBOARD*\\n━━━━━━━━━━━━━━━━━━━━\\n' + $json.reps.map((r, i) => `${i+1}. ${r.name}: ${r.deals} deals | Rp ${Number(r.value).toLocaleString('id-ID')} | W:${r.won} L:${r.lost}`).join('\\n') : '' }}",
+        "options": {}
+      },
+      "id": "send-forecast",
+      "name": "Send Forecast Report",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1130, 400],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Monday 8 AM": {
+      "main": [[
+        { "node": "Get Pipeline Summary", "type": "main", "index": 0 },
+        { "node": "Get Win/Loss Data", "type": "main", "index": 0 },
+        { "node": "Get Rep Performance", "type": "main", "index": 0 }
+      ]]
+    },
+    "Get Pipeline Summary": {
+      "main": [[{ "node": "Build Forecast", "type": "main", "index": 0 }]]
+    },
+    "Get Win/Loss Data": {
+      "main": [[{ "node": "Build Forecast", "type": "main", "index": 0 }]]
+    },
+    "Get Rep Performance": {
+      "main": [[{ "node": "Build Forecast", "type": "main", "index": 0 }]]
+    },
+    "Build Forecast": {
+      "main": [[{ "node": "Save Forecast", "type": "main", "index": 0 }]]
+    },
+    "Save Forecast": {
+      "main": [[{ "node": "Send Forecast Report", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Sales" }, { "name": "Forecasting" }, { "name": "Reporting" }]
+}

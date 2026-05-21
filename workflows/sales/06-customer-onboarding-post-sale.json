@@ -1,0 +1,128 @@
+{
+  "name": "Sales - Customer Onboarding (Post-Sale)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "hours", "hoursInterval": 1 }]
+        }
+      },
+      "id": "hourly",
+      "name": "Every Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT d.*, c.email, c.first_name, c.last_name, c.company, c.client_id FROM deals d JOIN contacts c ON c.id = d.contact_id WHERE d.stage = 'closed_won' AND d.updated_at > NOW() - INTERVAL '2 hours' AND NOT EXISTS ( SELECT 1 FROM lead_activities la WHERE la.contact_id = d.contact_id AND la.activity_type = 'customer_onboarding_started' )",
+        "options": {}
+      },
+      "id": "get-new-customers",
+      "name": "Get New Customers",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const customers = $input.all().map(i => i.json);\nif (!customers.length || !customers[0].id) return [];\n\nreturn customers.map(customer => ({\n  json: {\n    deal_id: customer.id,\n    contact_id: customer.contact_id,\n    email: customer.email,\n    first_name: customer.first_name,\n    last_name: customer.last_name,\n    company: customer.company,\n    deal_value: customer.deal_value,\n    assigned_to: customer.assigned_to,\n    client_id: customer.client_id,\n    onboarding_steps: [\n      { step: 1, name: 'welcome_email', delay_hours: 0, status: 'pending' },\n      { step: 2, name: 'account_setup_guide', delay_hours: 24, status: 'pending' },\n      { step: 3, name: 'kickoff_meeting_invite', delay_hours: 48, status: 'pending' },\n      { step: 4, name: 'training_resources', delay_hours: 72, status: 'pending' },\n      { step: 5, name: 'check_in_call', delay_hours: 168, status: 'pending' },\n      { step: 6, name: 'feedback_survey', delay_hours: 336, status: 'pending' }\n    ]\n  }\n}));"
+      },
+      "id": "prepare-onboarding",
+      "name": "Prepare Onboarding",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE contacts SET lead_status = 'customer' WHERE id = {{ $json.contact_id }}; INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) VALUES ({{ $json.contact_id }}, 'customer_onboarding_started', '{\"deal_id\": {{ $json.deal_id }}, \"deal_value\": {{ $json.deal_value }}, \"steps\": {{ $json.onboarding_steps.length }}}'::jsonb, 20);",
+        "options": {}
+      },
+      "id": "mark-onboarding",
+      "name": "Mark Onboarding Started",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "success@{{ $env.COMPANY_DOMAIN }}",
+        "toEmail": "={{ $json.email }}",
+        "subject": "Welcome aboard, {{ $json.first_name }}! Let's get you started 🚀",
+        "contentType": "html",
+        "content": "",
+        "options": {
+          "templateId": "d-customer-welcome",
+          "dynamicTemplateData": {
+            "first_name": "={{ $json.first_name }}",
+            "company": "={{ $json.company }}",
+            "assigned_to": "={{ $json.assigned_to }}"
+          }
+        }
+      },
+      "id": "send-welcome",
+      "name": "Send Welcome Email",
+      "type": "n8n-nodes-base.sendGrid",
+      "typeVersion": 1,
+      "position": [1130, 300],
+      "credentials": {
+        "sendGridApi": {
+          "id": "sendgrid-cred",
+          "name": "SendGrid API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#customer-success",
+        "text": "🎉 *New Customer Onboarding Started*\n\n*Customer:* {{ $json.first_name }} {{ $json.last_name }} ({{ $json.company }})\n*Deal Value:* Rp {{ Number($json.deal_value).toLocaleString('id-ID') }}\n*Account Manager:* {{ $json.assigned_to }}\n\n*Onboarding Steps:*\n{{ $json.onboarding_steps.map(s => `${s.step}. ${s.name.replace(/_/g, ' ')} (${s.delay_hours}h)`).join('\\n') }}\n\n_Welcome email sent. Next: Account setup guide in 24h._",
+        "options": {}
+      },
+      "id": "notify-cs-team",
+      "name": "Notify CS Team",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1350, 300],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every Hour": {
+      "main": [[{ "node": "Get New Customers", "type": "main", "index": 0 }]]
+    },
+    "Get New Customers": {
+      "main": [[{ "node": "Prepare Onboarding", "type": "main", "index": 0 }]]
+    },
+    "Prepare Onboarding": {
+      "main": [[{ "node": "Mark Onboarding Started", "type": "main", "index": 0 }]]
+    },
+    "Mark Onboarding Started": {
+      "main": [[{ "node": "Send Welcome Email", "type": "main", "index": 0 }]]
+    },
+    "Send Welcome Email": {
+      "main": [[{ "node": "Notify CS Team", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Sales" }, { "name": "Onboarding" }, { "name": "Customer Success" }]
+}

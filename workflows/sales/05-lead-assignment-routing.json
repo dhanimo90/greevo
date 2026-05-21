@@ -1,0 +1,127 @@
+{
+  "name": "Sales - Lead Assignment & Territory Routing",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "sales/assign-lead",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-assign",
+      "name": "Webhook - Assign Lead",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "*/30 * * * 1-5" }]
+        }
+      },
+      "id": "every-30min",
+      "name": "Every 30 Min (Weekdays)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 500]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.id, c.email, c.first_name, c.last_name, c.company, c.lead_score, c.custom_fields, c.client_id FROM contacts c WHERE c.lead_status = 'qualified' AND c.lead_score >= 50 AND NOT EXISTS (SELECT 1 FROM deals d WHERE d.contact_id = c.id AND d.stage NOT IN ('closed_lost')) AND NOT EXISTS (SELECT 1 FROM lead_activities la WHERE la.contact_id = c.id AND la.activity_type = 'lead_assigned' AND la.created_at > NOW() - INTERVAL '24 hours') ORDER BY c.lead_score DESC LIMIT 20",
+        "options": {}
+      },
+      "id": "get-unassigned",
+      "name": "Get Unassigned Qualified Leads",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 500],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const leads = $input.all().map(i => i.json);\nif (!leads.length || !leads[0].id) return [];\n\n// Sales team configuration\nconst salesTeam = [\n  { name: 'Sales Rep A', email: 'repa@company.com', territories: ['jakarta', 'jabodetabek'], specialties: ['enterprise'], max_active_deals: 15 },\n  { name: 'Sales Rep B', email: 'repb@company.com', territories: ['surabaya', 'jawa_timur'], specialties: ['smb', 'startup'], max_active_deals: 20 },\n  { name: 'Sales Rep C', email: 'repc@company.com', territories: ['bandung', 'jawa_barat'], specialties: ['smb'], max_active_deals: 20 },\n  { name: 'Sales Rep D', email: 'repd@company.com', territories: ['all'], specialties: ['all'], max_active_deals: 25 }\n];\n\n// Round-robin counter (simplified - in production use Redis)\nlet roundRobinIndex = Math.floor(Math.random() * salesTeam.length);\n\nconst results = [];\n\nfor (const lead of leads) {\n  const territory = (lead.custom_fields?.city || lead.custom_fields?.region || 'all').toLowerCase();\n  const companySize = lead.custom_fields?.company_size || '';\n  const isEnterprise = companySize.includes('500') || companySize.includes('1000') || lead.lead_score >= 80;\n  const specialty = isEnterprise ? 'enterprise' : 'smb';\n\n  // Find best match by territory + specialty\n  let assignedRep = null;\n  \n  // Priority 1: Territory + Specialty match\n  assignedRep = salesTeam.find(rep => \n    (rep.territories.includes(territory) || rep.territories.includes('all')) &&\n    (rep.specialties.includes(specialty) || rep.specialties.includes('all'))\n  );\n\n  // Priority 2: Territory match only\n  if (!assignedRep) {\n    assignedRep = salesTeam.find(rep => \n      rep.territories.includes(territory) || rep.territories.includes('all')\n    );\n  }\n\n  // Priority 3: Round-robin fallback\n  if (!assignedRep) {\n    assignedRep = salesTeam[roundRobinIndex % salesTeam.length];\n    roundRobinIndex++;\n  }\n\n  results.push({\n    json: {\n      contact_id: lead.id,\n      email: lead.email,\n      contact_name: `${lead.first_name} ${lead.last_name}`,\n      company: lead.company,\n      lead_score: lead.lead_score,\n      assigned_to: assignedRep.name,\n      assigned_email: assignedRep.email,\n      assignment_reason: `Territory: ${territory}, Specialty: ${specialty}`,\n      client_id: lead.client_id\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "assign-leads",
+      "name": "Assign Leads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO deals (contact_id, deal_name, stage, probability, assigned_to, client_id) VALUES ({{ $json.contact_id }}, '{{ $json.company || $json.contact_name }} - New Opportunity', 'prospecting', 10, '{{ $json.assigned_to }}', {{ $json.client_id || 'NULL' }}); INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) VALUES ({{ $json.contact_id }}, 'lead_assigned', '{\"assigned_to\": \"{{ $json.assigned_to }}\", \"reason\": \"{{ $json.assignment_reason }}\"}'::jsonb, 5); UPDATE contacts SET lead_status = 'opportunity' WHERE id = {{ $json.contact_id }};",
+        "options": {}
+      },
+      "id": "create-deal-assign",
+      "name": "Create Deal & Assign",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#sales-assignments",
+        "text": "🎯 *Lead Assigned*\n\n*Contact:* {{ $json.contact_name }} ({{ $json.company }})\n*Email:* {{ $json.email }}\n*Score:* {{ $json.lead_score }}\n*Assigned To:* {{ $json.assigned_to }}\n*Reason:* {{ $json.assignment_reason }}\n\n<@{{ $json.assigned_email }}> please follow up within 24 hours.",
+        "options": {}
+      },
+      "id": "notify-assignment",
+      "name": "Notify Assignment",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1130, 400],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, assigned_to: $json.assigned_to, contact: $json.contact_name }) }}"
+      },
+      "id": "response-ok",
+      "name": "Response OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1130, 250]
+    }
+  ],
+  "connections": {
+    "Webhook - Assign Lead": {
+      "main": [[{ "node": "Assign Leads", "type": "main", "index": 0 }]]
+    },
+    "Every 30 Min (Weekdays)": {
+      "main": [[{ "node": "Get Unassigned Qualified Leads", "type": "main", "index": 0 }]]
+    },
+    "Get Unassigned Qualified Leads": {
+      "main": [[{ "node": "Assign Leads", "type": "main", "index": 0 }]]
+    },
+    "Assign Leads": {
+      "main": [[{ "node": "Create Deal & Assign", "type": "main", "index": 0 }]]
+    },
+    "Create Deal & Assign": {
+      "main": [[
+        { "node": "Notify Assignment", "type": "main", "index": 0 },
+        { "node": "Response OK", "type": "main", "index": 0 }
+      ]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Sales" }, { "name": "Lead Routing" }, { "name": "Assignment" }]
+}

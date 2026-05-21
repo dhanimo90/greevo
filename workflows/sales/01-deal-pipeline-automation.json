@@ -1,0 +1,121 @@
+{
+  "name": "Sales - Deal Pipeline Automation",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 */2 * * 1-5" }]
+        }
+      },
+      "id": "every-2h-weekdays",
+      "name": "Every 2 Hours (Weekdays)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT d.*, c.email, c.first_name, c.last_name, c.company, c.lead_score, c.client_id, (SELECT COUNT(*) FROM lead_activities la WHERE la.contact_id = d.contact_id AND la.created_at > NOW() - INTERVAL '7 days') as recent_activities, (SELECT MAX(la.created_at) FROM lead_activities la WHERE la.contact_id = d.contact_id) as last_activity, (SELECT la.activity_type FROM lead_activities la WHERE la.contact_id = d.contact_id ORDER BY la.created_at DESC LIMIT 1) as last_activity_type FROM deals d JOIN contacts c ON c.id = d.contact_id WHERE d.stage NOT IN ('closed_won', 'closed_lost') ORDER BY d.deal_value DESC",
+        "options": {}
+      },
+      "id": "get-active-deals",
+      "name": "Get Active Deals",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const deals = $input.all().map(i => i.json);\nif (!deals.length || !deals[0].id) return [];\n\nconst results = [];\nconst now = Date.now();\n\nfor (const deal of deals) {\n  const lastActivity = deal.last_activity ? new Date(deal.last_activity).getTime() : 0;\n  const daysSinceActivity = (now - lastActivity) / (1000 * 60 * 60 * 24);\n  const createdAt = new Date(deal.created_at).getTime();\n  const daysInPipeline = (now - createdAt) / (1000 * 60 * 60 * 24);\n  \n  let newStage = deal.stage;\n  let action = null;\n  let reason = null;\n  let newProbability = deal.probability;\n\n  // Auto-advance rules\n  switch (deal.stage) {\n    case 'prospecting':\n      if (deal.recent_activities >= 3 && deal.lead_score >= 40) {\n        newStage = 'qualification';\n        newProbability = 20;\n        reason = 'High engagement + lead score threshold';\n        action = 'stage_advanced';\n      }\n      break;\n\n    case 'qualification':\n      if (deal.last_activity_type === 'meeting_scheduled' || deal.last_activity_type === 'demo_completed') {\n        newStage = 'proposal';\n        newProbability = 40;\n        reason = 'Meeting/demo completed';\n        action = 'stage_advanced';\n      } else if (daysSinceActivity > 14) {\n        action = 'stale_warning';\n        reason = `No activity for ${Math.round(daysSinceActivity)} days`;\n      }\n      break;\n\n    case 'proposal':\n      if (deal.last_activity_type === 'proposal_viewed' || deal.last_activity_type === 'proposal_signed') {\n        newStage = 'negotiation';\n        newProbability = 60;\n        reason = 'Proposal viewed/signed';\n        action = 'stage_advanced';\n      } else if (daysSinceActivity > 7) {\n        action = 'follow_up_needed';\n        reason = 'Proposal sent but no response';\n      }\n      break;\n\n    case 'negotiation':\n      if (deal.last_activity_type === 'contract_signed') {\n        newStage = 'closed_won';\n        newProbability = 100;\n        reason = 'Contract signed';\n        action = 'deal_won';\n      } else if (daysSinceActivity > 10) {\n        action = 'escalation_needed';\n        reason = 'Negotiation stalled';\n      }\n      break;\n  }\n\n  // Stale deal detection\n  if (!action && daysSinceActivity > 30 && deal.stage !== 'prospecting') {\n    action = 'at_risk';\n    reason = `Deal stale for ${Math.round(daysSinceActivity)} days`;\n    newProbability = Math.max(5, deal.probability - 20);\n  }\n\n  // Expected close date passed\n  if (deal.expected_close_date && new Date(deal.expected_close_date) < new Date() && !action) {\n    action = 'overdue';\n    reason = 'Expected close date has passed';\n  }\n\n  if (action) {\n    results.push({\n      json: {\n        deal_id: deal.id,\n        deal_name: deal.deal_name,\n        deal_value: deal.deal_value,\n        contact_email: deal.email,\n        contact_name: `${deal.first_name} ${deal.last_name}`,\n        company: deal.company,\n        current_stage: deal.stage,\n        new_stage: newStage,\n        new_probability: newProbability,\n        action: action,\n        reason: reason,\n        assigned_to: deal.assigned_to,\n        client_id: deal.client_id,\n        days_in_pipeline: Math.round(daysInPipeline),\n        days_since_activity: Math.round(daysSinceActivity)\n      }\n    });\n  }\n}\n\nreturn results;"
+      },
+      "id": "evaluate-deals",
+      "name": "Evaluate Deal Progress",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "operation": "equal",
+              "value2": "stage_advanced"
+            }
+          ]
+        }
+      },
+      "id": "is-stage-change",
+      "name": "Stage Changed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE deals SET stage = '{{ $json.new_stage }}', probability = {{ $json.new_probability }}, updated_at = NOW() WHERE id = {{ $json.deal_id }}; INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) SELECT contact_id, 'deal_stage_changed', '{\"from\": \"{{ $json.current_stage }}\", \"to\": \"{{ $json.new_stage }}\", \"reason\": \"{{ $json.reason }}\"}'::jsonb, 5 FROM deals WHERE id = {{ $json.deal_id }};",
+        "options": {}
+      },
+      "id": "update-deal-stage",
+      "name": "Update Deal Stage",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#sales-pipeline",
+        "text": "{{ $json.action === 'deal_won' ? '🎉' : $json.action === 'stage_advanced' ? '📈' : $json.action === 'at_risk' ? '⚠️' : $json.action === 'overdue' ? '⏰' : '📋' }} *Deal Update: {{ $json.deal_name }}*\n\n*Action:* {{ $json.action.replace(/_/g, ' ').toUpperCase() }}\n*Reason:* {{ $json.reason }}\n*Contact:* {{ $json.contact_name }} ({{ $json.company }})\n*Value:* Rp {{ Number($json.deal_value).toLocaleString('id-ID') }}\n*Stage:* {{ $json.current_stage }} → {{ $json.new_stage }}\n*Assigned:* {{ $json.assigned_to || 'Unassigned' }}\n*Days in Pipeline:* {{ $json.days_in_pipeline }}",
+        "options": {}
+      },
+      "id": "notify-deal-update",
+      "name": "Notify Deal Update",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1130, 400],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 2 Hours (Weekdays)": {
+      "main": [[{ "node": "Get Active Deals", "type": "main", "index": 0 }]]
+    },
+    "Get Active Deals": {
+      "main": [[{ "node": "Evaluate Deal Progress", "type": "main", "index": 0 }]]
+    },
+    "Evaluate Deal Progress": {
+      "main": [[{ "node": "Stage Changed?", "type": "main", "index": 0 }]]
+    },
+    "Stage Changed?": {
+      "main": [
+        [{ "node": "Update Deal Stage", "type": "main", "index": 0 }],
+        [{ "node": "Notify Deal Update", "type": "main", "index": 0 }]
+      ]
+    },
+    "Update Deal Stage": {
+      "main": [[{ "node": "Notify Deal Update", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Sales" }, { "name": "Pipeline" }, { "name": "Automation" }]
+}

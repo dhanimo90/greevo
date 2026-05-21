@@ -168,21 +168,21 @@ Akses n8n di `http://localhost:5678`, import workflows, konfigurasi credentials,
 
 ---
 
-### Phase 5: Sales Pipeline & Revenue `Minggu 9-10`
+### Phase 5: Sales Pipeline & Revenue ✅ `Minggu 9-10`
 > CRM yang lebih dalam untuk sales team
 
-- [ ] Deal pipeline automation (auto-move stages)
-- [ ] Meeting scheduler integration (Calendly/Cal.com)
-- [ ] Proposal/quote generation workflow
-- [ ] Contract signing integration (DocuSign/PandaDoc)
-- [ ] Invoice generation & payment tracking
-- [ ] Sales forecasting
-- [ ] Territory/assignment rules (round-robin, capacity-based)
-- [ ] Win/loss analysis automation
-- [ ] Customer onboarding workflow (post-sale)
-- [ ] Upsell/cross-sell trigger workflows
+- [x] Deal pipeline automation (auto-move stages)
+- [x] Meeting scheduler integration (Calendly/Cal.com)
+- [x] Proposal/quote generation workflow
+- [x] Contract signing integration (DocuSign/PandaDoc)
+- [x] Invoice generation & payment tracking
+- [x] Sales forecasting
+- [x] Territory/assignment rules (round-robin, capacity-based)
+- [x] Win/loss analysis automation
+- [x] Customer onboarding workflow (post-sale)
+- [x] Upsell/cross-sell trigger workflows
 
-**Milestone:** Revenue Operations — lead to deal, fully automated
+**Milestone:** Revenue Operations — lead to deal, fully automated ✅
 
 ---
 

@@ -1,0 +1,146 @@
+{
+  "name": "Sales - Meeting Scheduler Integration",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "meetings/booked",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-meeting",
+      "name": "Webhook - Meeting Booked",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\n\n// Support Calendly, Cal.com, or custom webhook\nconst meeting = {\n  email: body.invitee?.email || body.attendees?.[0]?.email || body.email,\n  name: body.invitee?.name || body.attendees?.[0]?.name || body.name,\n  meeting_type: body.event_type?.name || body.eventType || body.meeting_type || 'discovery_call',\n  scheduled_at: body.event?.start_time || body.startTime || body.scheduled_at,\n  duration_minutes: body.event?.duration || body.duration || 30,\n  meeting_url: body.event?.location?.join_url || body.meetingUrl || body.location,\n  assigned_to: body.event?.event_memberships?.[0]?.user_name || body.organizer || body.assigned_to,\n  notes: body.questions_and_answers?.map(q => `${q.question}: ${q.answer}`).join('\\n') || body.notes || '',\n  source: body.source || 'calendly',\n  client_id: body.client_id\n};\n\nif (!meeting.email) {\n  return [{ json: { error: true, message: 'Missing attendee email' } }];\n}\n\nreturn [{ json: meeting }];"
+      },
+      "id": "parse-meeting",
+      "name": "Parse Meeting Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, first_name, last_name, company, lead_score, lead_status FROM contacts WHERE email = '{{ $json.email }}' LIMIT 1",
+        "options": {}
+      },
+      "id": "find-contact",
+      "name": "Find Contact",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const contact = $input.first().json;\nconst meeting = $node['Parse Meeting Data'].json;\n\nconst contactId = contact.id || null;\nconst isNewContact = !contactId;\n\nreturn [{\n  json: {\n    ...meeting,\n    contact_id: contactId,\n    is_new_contact: isNewContact,\n    contact_name: contact.first_name ? `${contact.first_name} ${contact.last_name}` : meeting.name,\n    company: contact.company || '',\n    lead_score: contact.lead_score || 0\n  }\n}];"
+      },
+      "id": "enrich-data",
+      "name": "Enrich Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.contact_id ? '' : \"INSERT INTO contacts (email, first_name, source, lead_status) VALUES ('\" + $json.email + \"', '\" + ($json.name || '').split(' ')[0] + \"', 'meeting', 'contacted') ON CONFLICT (email) DO UPDATE SET lead_status = 'contacted' RETURNING id;\" }} INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) VALUES ({{ $json.contact_id || '(SELECT id FROM contacts WHERE email = \\'' + $json.email + '\\')' }}, 'meeting_scheduled', '{{ JSON.stringify({type: $json.meeting_type, scheduled_at: $json.scheduled_at, duration: $json.duration_minutes, assigned_to: $json.assigned_to, source: $json.source}) }}'::jsonb, 15); UPDATE contacts SET lead_score = lead_score + 15, lead_status = CASE WHEN lead_status = 'new' THEN 'contacted' ELSE lead_status END WHERE email = '{{ $json.email }}';",
+        "options": {}
+      },
+      "id": "log-meeting",
+      "name": "Log Meeting & Update Score",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO deals (contact_id, deal_name, stage, probability, assigned_to, client_id, notes) SELECT c.id, '{{ $json.meeting_type }} - ' || c.company || ' (' || c.first_name || ')', 'qualification', 20, '{{ $json.assigned_to }}', {{ $json.client_id || 'c.client_id' }}, '{{ $json.notes }}' FROM contacts c WHERE c.email = '{{ $json.email }}' AND NOT EXISTS (SELECT 1 FROM deals d WHERE d.contact_id = c.id AND d.stage NOT IN ('closed_won', 'closed_lost')) RETURNING *",
+        "options": {}
+      },
+      "id": "create-deal",
+      "name": "Create Deal (if none)",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1350, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#sales-meetings",
+        "text": "📅 *New Meeting Booked*\n\n*Contact:* {{ $json.contact_name }} ({{ $json.email }})\n*Company:* {{ $json.company }}\n*Type:* {{ $json.meeting_type }}\n*When:* {{ $json.scheduled_at }}\n*Duration:* {{ $json.duration_minutes }} min\n*Assigned:* {{ $json.assigned_to }}\n*Lead Score:* {{ $json.lead_score }}\n{{ $json.notes ? '\\n*Notes:*\\n' + $json.notes : '' }}\n{{ $json.meeting_url ? '\\n🔗 ' + $json.meeting_url : '' }}",
+        "options": {}
+      },
+      "id": "notify-meeting",
+      "name": "Notify Team",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1570, 300],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, message: 'Meeting logged', contact: $json.contact_name }) }}"
+      },
+      "id": "response-ok",
+      "name": "Response OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1790, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Meeting Booked": {
+      "main": [[{ "node": "Parse Meeting Data", "type": "main", "index": 0 }]]
+    },
+    "Parse Meeting Data": {
+      "main": [[{ "node": "Find Contact", "type": "main", "index": 0 }]]
+    },
+    "Find Contact": {
+      "main": [[{ "node": "Enrich Data", "type": "main", "index": 0 }]]
+    },
+    "Enrich Data": {
+      "main": [[{ "node": "Log Meeting & Update Score", "type": "main", "index": 0 }]]
+    },
+    "Log Meeting & Update Score": {
+      "main": [[{ "node": "Create Deal (if none)", "type": "main", "index": 0 }]]
+    },
+    "Create Deal (if none)": {
+      "main": [[{ "node": "Notify Team", "type": "main", "index": 0 }]]
+    },
+    "Notify Team": {
+      "main": [[{ "node": "Response OK", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Sales" }, { "name": "Meetings" }, { "name": "Integration" }]
+}
