@@ -1,0 +1,150 @@
+{
+  "name": "SaaS - Client Portal API",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "portal/dashboard",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "api-dashboard",
+      "name": "GET Dashboard",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 200]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "portal/contacts",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "api-contacts",
+      "name": "GET Contacts",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 400]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "portal/keywords",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "api-keywords",
+      "name": "GET Keywords",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 600]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst headers = input.headers || {};\nconst apiKey = headers['x-api-key'] || headers['authorization']?.replace('Bearer ', '');\nif (!apiKey) return [{ json: { error: true, status: 401, message: 'Unauthorized' } }];\nreturn [{ json: { api_key: apiKey, query: input.query || {} } }];"
+      },
+      "id": "auth-dashboard",
+      "name": "Auth Dashboard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst headers = input.headers || {};\nconst apiKey = headers['x-api-key'] || headers['authorization']?.replace('Bearer ', '');\nif (!apiKey) return [{ json: { error: true, status: 401, message: 'Unauthorized' } }];\nconst query = input.query || {};\nreturn [{ json: { api_key: apiKey, page: parseInt(query.page) || 1, limit: Math.min(parseInt(query.limit) || 50, 100), status: query.status || null, search: query.search || null } }];"
+      },
+      "id": "auth-contacts",
+      "name": "Auth Contacts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 400]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst headers = input.headers || {};\nconst apiKey = headers['x-api-key'] || headers['authorization']?.replace('Bearer ', '');\nif (!apiKey) return [{ json: { error: true, status: 401, message: 'Unauthorized' } }];\nreturn [{ json: { api_key: apiKey, query: input.query || {} } }];"
+      },
+      "id": "auth-keywords",
+      "name": "Auth Keywords",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 600]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.id as client_id, c.client_code, c.company_name, c.plan_type, (SELECT COUNT(*) FROM contacts WHERE client_id = c.id) as total_contacts, c.max_contacts, (SELECT COUNT(*) FROM contacts WHERE client_id = c.id AND lead_status = 'customer') as customers, (SELECT COUNT(*) FROM contacts WHERE client_id = c.id AND lead_score >= 80) as hot_leads, (SELECT COALESCE(SUM(deal_value),0) FROM deals d JOIN contacts ct ON ct.id = d.contact_id WHERE ct.client_id = c.id AND d.stage NOT IN ('closed_won','closed_lost')) as pipeline_value, (SELECT COALESCE(SUM(deal_value),0) FROM deals d JOIN contacts ct ON ct.id = d.contact_id WHERE ct.client_id = c.id AND d.stage = 'closed_won' AND d.updated_at > date_trunc('month', NOW())) as revenue_mtd, (SELECT COUNT(*) FROM tracked_keywords WHERE client_id = c.id AND is_active = true) as tracked_keywords, c.max_keywords, (SELECT COUNT(*) FROM keyword_rankings kr JOIN tracked_keywords tk ON tk.id = kr.keyword_id WHERE tk.client_id = c.id AND kr.position <= 10 AND kr.checked_at > NOW() - INTERVAL '1 day') as top10_count FROM clients c WHERE c.api_key = '{{ $json.api_key }}' AND c.status = 'active' LIMIT 1",
+        "options": {}
+      },
+      "id": "get-dashboard-data",
+      "name": "Get Dashboard Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 200],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c2.id, c2.email, c2.first_name, c2.last_name, c2.company, c2.lead_score, c2.lead_status, c2.source, c2.created_at FROM contacts c2 JOIN clients cl ON cl.id = c2.client_id WHERE cl.api_key = '{{ $json.api_key }}' AND cl.status = 'active' {{ $json.status ? \"AND c2.lead_status = '\" + $json.status + \"'\" : '' }} {{ $json.search ? \"AND (c2.email ILIKE '%\" + $json.search + \"%' OR c2.first_name ILIKE '%\" + $json.search + \"%' OR c2.company ILIKE '%\" + $json.search + \"%')\" : '' }} ORDER BY c2.created_at DESC LIMIT {{ $json.limit }} OFFSET {{ ($json.page - 1) * $json.limit }}",
+        "options": {}
+      },
+      "id": "get-contacts-data",
+      "name": "Get Contacts Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 400],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT tk.id, tk.keyword, tk.target_url, kr.position, kr.previous_position, (kr.previous_position - kr.position) as change, kr.search_volume, kr.checked_at FROM tracked_keywords tk LEFT JOIN LATERAL (SELECT * FROM keyword_rankings WHERE keyword_id = tk.id ORDER BY checked_at DESC LIMIT 1) kr ON true JOIN clients cl ON cl.id = tk.client_id WHERE cl.api_key = '{{ $json.api_key }}' AND cl.status = 'active' AND tk.is_active = true ORDER BY kr.search_volume DESC NULLS LAST",
+        "options": {}
+      },
+      "id": "get-keywords-data",
+      "name": "Get Keywords Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 600],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": { "respondWith": "json", "responseBody": "={{ JSON.stringify({ success: true, data: $json }) }}" },
+      "id": "resp-dashboard",
+      "name": "Resp Dashboard",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [910, 200]
+    },
+    {
+      "parameters": { "respondWith": "json", "responseBody": "={{ JSON.stringify({ success: true, data: $input.all().map(i => i.json), page: $node['Auth Contacts'].json.page, limit: $node['Auth Contacts'].json.limit }) }}" },
+      "id": "resp-contacts",
+      "name": "Resp Contacts",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [910, 400]
+    },
+    {
+      "parameters": { "respondWith": "json", "responseBody": "={{ JSON.stringify({ success: true, data: $input.all().map(i => i.json) }) }}" },
+      "id": "resp-keywords",
+      "name": "Resp Keywords",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [910, 600]
+    }
+  ],
+  "connections": {
+    "GET Dashboard": { "main": [[{ "node": "Auth Dashboard", "type": "main", "index": 0 }]] },
+    "Auth Dashboard": { "main": [[{ "node": "Get Dashboard Data", "type": "main", "index": 0 }]] },
+    "Get Dashboard Data": { "main": [[{ "node": "Resp Dashboard", "type": "main", "index": 0 }]] },
+    "GET Contacts": { "main": [[{ "node": "Auth Contacts", "type": "main", "index": 0 }]] },
+    "Auth Contacts": { "main": [[{ "node": "Get Contacts Data", "type": "main", "index": 0 }]] },
+    "Get Contacts Data": { "main": [[{ "node": "Resp Contacts", "type": "main", "index": 0 }]] },
+    "GET Keywords": { "main": [[{ "node": "Auth Keywords", "type": "main", "index": 0 }]] },
+    "Auth Keywords": { "main": [[{ "node": "Get Keywords Data", "type": "main", "index": 0 }]] },
+    "Get Keywords Data": { "main": [[{ "node": "Resp Keywords", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "SaaS" }, { "name": "Portal" }, { "name": "API" }]
+}

@@ -1,0 +1,85 @@
+{
+  "name": "SaaS - SLA & Uptime Monitoring",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "minutes", "minutesInterval": 1 }] }
+      },
+      "id": "every-minute",
+      "name": "Every Minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "url": "http://localhost:5678/healthz",
+        "method": "GET",
+        "options": { "timeout": 5000 }
+      },
+      "id": "check-n8n",
+      "name": "Check n8n",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [470, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "functionCode": "const response = $input.first().json;\nconst isUp = !response.error && (response.statusCode === 200 || response.status === 'ok');\nconst now = new Date();\nconst minute = now.toISOString().slice(0, 16); // YYYY-MM-DDTHH:MM\n\nreturn [{ json: {\n  is_up: isUp,\n  response_time_ms: response.responseTime || 0,\n  checked_at: now.toISOString(),\n  minute: minute,\n  status: isUp ? 'up' : 'down'\n}}];"
+      },
+      "id": "evaluate-uptime",
+      "name": "Evaluate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO uptime_checks (status, response_time_ms, checked_at) VALUES ('{{ $json.status }}', {{ $json.response_time_ms }}, '{{ $json.checked_at }}'); SELECT (SELECT COUNT(*) FROM uptime_checks WHERE status = 'up' AND checked_at > NOW() - INTERVAL '30 days') as up_count, (SELECT COUNT(*) FROM uptime_checks WHERE checked_at > NOW() - INTERVAL '30 days') as total_count, (SELECT COUNT(*) FROM uptime_checks WHERE status = 'down' AND checked_at > NOW() - INTERVAL '5 minutes') as recent_downs",
+        "options": {}
+      },
+      "id": "save-check",
+      "name": "Save & Get Stats",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [{ "value1": "={{ $json.recent_downs }}", "operation": "largerEqual", "value2": 3 }]
+        }
+      },
+      "id": "is-outage",
+      "name": "Outage Detected?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1130, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#system-alerts",
+        "text": "🚨 *OUTAGE DETECTED*\n\n*Service:* n8n\n*Status:* DOWN\n*Consecutive failures:* {{ $json.recent_downs }}\n*Uptime (30d):* {{ $json.total_count > 0 ? Math.round($json.up_count / $json.total_count * 10000) / 100 : 0 }}%\n\n⚡ Immediate investigation required!",
+        "options": {}
+      },
+      "id": "alert-outage",
+      "name": "Alert Outage",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1350, 200],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack Bot" } }
+    }
+  ],
+  "connections": {
+    "Every Minute": { "main": [[{ "node": "Check n8n", "type": "main", "index": 0 }]] },
+    "Check n8n": { "main": [[{ "node": "Evaluate", "type": "main", "index": 0 }]] },
+    "Evaluate": { "main": [[{ "node": "Save & Get Stats", "type": "main", "index": 0 }]] },
+    "Save & Get Stats": { "main": [[{ "node": "Outage Detected?", "type": "main", "index": 0 }]] },
+    "Outage Detected?": { "main": [[{ "node": "Alert Outage", "type": "main", "index": 0 }], []] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "SaaS" }, { "name": "SLA" }, { "name": "Uptime" }]
+}

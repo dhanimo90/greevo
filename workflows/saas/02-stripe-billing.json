@@ -1,0 +1,122 @@
+{
+  "name": "SaaS - Stripe Billing & Subscription",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "billing/stripe-webhook",
+        "responseMode": "responseNode",
+        "options": { "rawBody": true }
+      },
+      "id": "stripe-webhook",
+      "name": "Stripe Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\nconst event = body;\n\nconst eventType = event.type;\nconst data = event.data?.object || {};\n\nreturn [{\n  json: {\n    event_type: eventType,\n    customer_id: data.customer,\n    subscription_id: data.id || data.subscription,\n    email: data.customer_email || data.receipt_email,\n    amount: data.amount_paid || data.amount || 0,\n    currency: data.currency || 'usd',\n    status: data.status,\n    plan_id: data.items?.data?.[0]?.price?.id || data.plan?.id,\n    period_start: data.current_period_start,\n    period_end: data.current_period_end,\n    cancel_at: data.cancel_at,\n    invoice_url: data.hosted_invoice_url || data.invoice_pdf\n  }\n}];"
+      },
+      "id": "parse-stripe",
+      "name": "Parse Stripe Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const event = $input.first().json;\nlet action = 'log';\nlet planType = 'standard';\n\n// Map Stripe price IDs to plan types\nconst planMap = {\n  'price_starter_monthly': 'starter',\n  'price_standard_monthly': 'standard',\n  'price_enterprise_monthly': 'enterprise'\n};\nplanType = planMap[event.plan_id] || 'standard';\n\nswitch (event.event_type) {\n  case 'customer.subscription.created':\n    action = 'subscription_created';\n    break;\n  case 'customer.subscription.updated':\n    action = event.cancel_at ? 'subscription_cancelling' : 'subscription_updated';\n    break;\n  case 'customer.subscription.deleted':\n    action = 'subscription_cancelled';\n    break;\n  case 'invoice.paid':\n    action = 'payment_received';\n    break;\n  case 'invoice.payment_failed':\n    action = 'payment_failed';\n    break;\n  default:\n    action = 'other';\n}\n\nreturn [{ json: { ...event, action, plan_type: planType } }];"
+      },
+      "id": "determine-action",
+      "name": "Determine Action",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [{ "value1": "={{ $json.action }}", "operation": "equal", "value2": "subscription_created" }]
+        }
+      },
+      "id": "is-new-sub",
+      "name": "New Subscription?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE clients SET plan_type = '{{ $json.plan_type }}', config = config || '{\"stripe_customer_id\": \"{{ $json.customer_id }}\", \"stripe_subscription_id\": \"{{ $json.subscription_id }}\", \"billing_status\": \"active\"}'::jsonb, status = 'active' WHERE contact_email = '{{ $json.email }}' OR config->>'stripe_customer_id' = '{{ $json.customer_id }}' RETURNING id, client_code, company_name",
+        "options": {}
+      },
+      "id": "activate-subscription",
+      "name": "Activate Subscription",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 200],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE clients SET status = CASE WHEN '{{ $json.action }}' = 'subscription_cancelled' THEN 'churned' WHEN '{{ $json.action }}' = 'payment_failed' THEN 'suspended' ELSE status END, config = config || '{\"billing_status\": \"{{ $json.action === 'payment_failed' ? 'past_due' : $json.action === 'subscription_cancelled' ? 'cancelled' : 'active' }}\"}'::jsonb WHERE config->>'stripe_customer_id' = '{{ $json.customer_id }}' RETURNING id, client_code, company_name, status",
+        "options": {}
+      },
+      "id": "update-billing-status",
+      "name": "Update Billing Status",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 400],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT log_audit((SELECT id FROM clients WHERE config->>'stripe_customer_id' = '{{ $json.customer_id }}'), 'stripe-billing', '{{ $json.action }}', 'billing', NULL, '{{ JSON.stringify({event_type: $json.event_type, amount: $json.amount, currency: $json.currency, plan: $json.plan_type, status: $json.status}) }}'::jsonb, '{{ $json.action === 'payment_failed' ? 'error' : 'success' }}')",
+        "options": {}
+      },
+      "id": "log-billing",
+      "name": "Log Billing Event",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1350, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "channel": "#billing",
+        "text": "{{ $json.action === 'payment_received' ? '💰' : $json.action === 'payment_failed' ? '❌' : $json.action === 'subscription_created' ? '🎉' : '📋' }} *Billing: {{ $json.action.replace(/_/g, ' ').toUpperCase() }}*\n\n*Customer:* {{ $json.email }}\n*Plan:* {{ $json.plan_type }}\n*Amount:* {{ $json.currency.toUpperCase() }} {{ ($json.amount / 100).toLocaleString() }}\n*Status:* {{ $json.status }}",
+        "options": {}
+      },
+      "id": "notify-billing",
+      "name": "Notify Billing",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1570, 300],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack Bot" } }
+    },
+    {
+      "parameters": { "respondWith": "json", "responseBody": "={{ JSON.stringify({ received: true }) }}" },
+      "id": "response-ok",
+      "name": "Response OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1790, 300]
+    }
+  ],
+  "connections": {
+    "Stripe Webhook": { "main": [[{ "node": "Parse Stripe Event", "type": "main", "index": 0 }]] },
+    "Parse Stripe Event": { "main": [[{ "node": "Determine Action", "type": "main", "index": 0 }]] },
+    "Determine Action": { "main": [[{ "node": "New Subscription?", "type": "main", "index": 0 }]] },
+    "New Subscription?": { "main": [[{ "node": "Activate Subscription", "type": "main", "index": 0 }], [{ "node": "Update Billing Status", "type": "main", "index": 0 }]] },
+    "Activate Subscription": { "main": [[{ "node": "Log Billing Event", "type": "main", "index": 0 }]] },
+    "Update Billing Status": { "main": [[{ "node": "Log Billing Event", "type": "main", "index": 0 }]] },
+    "Log Billing Event": { "main": [[{ "node": "Notify Billing", "type": "main", "index": 0 }]] },
+    "Notify Billing": { "main": [[{ "node": "Response OK", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "SaaS" }, { "name": "Billing" }, { "name": "Stripe" }]
+}

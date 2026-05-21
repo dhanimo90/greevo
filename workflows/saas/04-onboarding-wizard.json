@@ -1,0 +1,120 @@
+{
+  "name": "SaaS - Self-Service Onboarding Wizard",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "onboarding/signup",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-signup",
+      "name": "Webhook - Signup",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 200]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "onboarding/setup-step",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-step",
+      "name": "Webhook - Setup Step",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 500]
+    },
+    {
+      "parameters": {
+        "functionCode": "const crypto = require('crypto');\nconst input = $input.first().json;\nconst body = input.body || input;\n\nif (!body.email || !body.company_name) {\n  return [{ json: { error: true, message: 'Email and company_name required' } }];\n}\n\nconst clientCode = body.company_name.toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 20) + '_' + Date.now().toString(36).slice(-4);\nconst apiKey = 'gv_' + crypto.randomBytes(32).toString('hex');\nconst webhookSecret = crypto.randomBytes(24).toString('base64url');\n\nreturn [{ json: {\n  email: body.email,\n  company_name: body.company_name,\n  contact_name: body.name || body.contact_name || '',\n  domain: body.domain || '',\n  plan_type: body.plan || 'standard',\n  client_code: clientCode,\n  api_key: apiKey,\n  webhook_secret: webhookSecret,\n  onboarding_steps: [\n    { step: 1, name: 'account_created', status: 'completed' },\n    { step: 2, name: 'domain_configured', status: 'pending' },\n    { step: 3, name: 'first_contact_added', status: 'pending' },\n    { step: 4, name: 'first_keyword_added', status: 'pending' },\n    { step: 5, name: 'notification_setup', status: 'pending' },\n    { step: 6, name: 'first_campaign_created', status: 'pending' }\n  ]\n}}];"
+      },
+      "id": "process-signup",
+      "name": "Process Signup",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO clients (client_code, company_name, domain, contact_email, contact_name, plan_type, status, api_key, webhook_secret, config) VALUES ('{{ $json.client_code }}', '{{ $json.company_name }}', '{{ $json.domain }}', '{{ $json.email }}', '{{ $json.contact_name }}', '{{ $json.plan_type }}', 'onboarding', '{{ $json.api_key }}', '{{ $json.webhook_secret }}', '{{ JSON.stringify({onboarding_steps: $json.onboarding_steps, signup_at: new Date().toISOString()}) }}'::jsonb) RETURNING id, client_code, api_key",
+        "options": {}
+      },
+      "id": "create-account",
+      "name": "Create Account",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 200],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "fromEmail": "welcome@{{ $env.COMPANY_DOMAIN }}",
+        "toEmail": "={{ $node['Process Signup'].json.email }}",
+        "subject": "Welcome to GreeVo! Let's get you set up 🚀",
+        "contentType": "html",
+        "content": "",
+        "options": { "templateId": "d-onboarding-welcome", "dynamicTemplateData": { "name": "={{ $node['Process Signup'].json.contact_name }}", "company": "={{ $node['Process Signup'].json.company_name }}", "api_key": "={{ $json.api_key }}", "client_code": "={{ $json.client_code }}", "setup_url": "={{ 'https://' + ($env.COMPANY_DOMAIN || 'app.greevo.id') + '/setup/' + $json.client_code }}" } }
+      },
+      "id": "send-welcome",
+      "name": "Send Welcome",
+      "type": "n8n-nodes-base.sendGrid",
+      "typeVersion": 1,
+      "position": [910, 200],
+      "credentials": { "sendGridApi": { "id": "sendgrid-cred", "name": "SendGrid API" } }
+    },
+    {
+      "parameters": { "respondWith": "json", "responseBody": "={{ JSON.stringify({ success: true, client_code: $node['Create Account'].json.client_code, api_key: $node['Create Account'].json.api_key, next_step: 'Configure your domain', setup_url: 'https://' + ($env.COMPANY_DOMAIN || 'app.greevo.id') + '/setup/' + $node['Create Account'].json.client_code }) }}" },
+      "id": "resp-signup",
+      "name": "Resp Signup",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1130, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\nreturn [{ json: { client_code: body.client_code, step_name: body.step, step_data: body.data || {} } }];"
+      },
+      "id": "parse-step",
+      "name": "Parse Step",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 500]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE clients SET config = jsonb_set(config, '{onboarding_progress}', (COALESCE(config->'onboarding_progress', '0')::int + 1)::text::jsonb) WHERE client_code = '{{ $json.client_code }}' RETURNING id, config",
+        "options": {}
+      },
+      "id": "update-progress",
+      "name": "Update Progress",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 500],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": { "respondWith": "json", "responseBody": "={{ JSON.stringify({ success: true, step: $node['Parse Step'].json.step_name, message: 'Step completed' }) }}" },
+      "id": "resp-step",
+      "name": "Resp Step",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [910, 500]
+    }
+  ],
+  "connections": {
+    "Webhook - Signup": { "main": [[{ "node": "Process Signup", "type": "main", "index": 0 }]] },
+    "Process Signup": { "main": [[{ "node": "Create Account", "type": "main", "index": 0 }]] },
+    "Create Account": { "main": [[{ "node": "Send Welcome", "type": "main", "index": 0 }]] },
+    "Send Welcome": { "main": [[{ "node": "Resp Signup", "type": "main", "index": 0 }]] },
+    "Webhook - Setup Step": { "main": [[{ "node": "Parse Step", "type": "main", "index": 0 }]] },
+    "Parse Step": { "main": [[{ "node": "Update Progress", "type": "main", "index": 0 }]] },
+    "Update Progress": { "main": [[{ "node": "Resp Step", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "SaaS" }, { "name": "Onboarding" }, { "name": "Self-Service" }]
+}

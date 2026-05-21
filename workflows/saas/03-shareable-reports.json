@@ -1,0 +1,132 @@
+{
+  "name": "SaaS - Shareable Report Links",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "reports/generate",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-generate",
+      "name": "Generate Report Link",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 200]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "reports/view/:token",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-view",
+      "name": "View Report",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 500]
+    },
+    {
+      "parameters": {
+        "functionCode": "const crypto = require('crypto');\nconst input = $input.first().json;\nconst body = input.body || input;\n\nconst token = crypto.randomBytes(32).toString('hex');\nconst expiresAt = new Date(Date.now() + (body.expires_days || 7) * 24 * 60 * 60 * 1000);\n\nreturn [{ json: {\n  token: token,\n  report_type: body.report_type || 'seo_weekly',\n  client_id: body.client_id,\n  title: body.title || 'Performance Report',\n  expires_at: expiresAt.toISOString(),\n  created_by: body.created_by || 'system'\n}}];"
+      },
+      "id": "generate-token",
+      "name": "Generate Token",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO shared_reports (token, report_type, client_id, title, expires_at, created_by) VALUES ('{{ $json.token }}', '{{ $json.report_type }}', {{ $json.client_id }}, '{{ $json.title }}', '{{ $json.expires_at }}', '{{ $json.created_by }}') RETURNING *",
+        "options": {}
+      },
+      "id": "save-report-link",
+      "name": "Save Report Link",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 200],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": { "respondWith": "json", "responseBody": "={{ JSON.stringify({ success: true, report_url: 'https://' + ($env.N8N_HOST || 'localhost:5678') + '/webhook/reports/view/' + $json.token, expires_at: $json.expires_at, token: $json.token }) }}" },
+      "id": "resp-generate",
+      "name": "Resp Generate",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [910, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst params = input.params || {};\nconst token = params.token || '';\nif (!token) return [{ json: { error: true, message: 'Invalid token' } }];\nreturn [{ json: { token } }];"
+      },
+      "id": "extract-token",
+      "name": "Extract Token",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 500]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT sr.*, c.company_name, c.client_code FROM shared_reports sr JOIN clients c ON c.id = sr.client_id WHERE sr.token = '{{ $json.token }}' AND sr.expires_at > NOW() LIMIT 1",
+        "options": {}
+      },
+      "id": "validate-token",
+      "name": "Validate Token",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 500],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT metrics FROM analytics_snapshots WHERE client_id = {{ $json.client_id || 0 }} AND source = '{{ $json.report_type === 'seo_weekly' ? 'seo_combined' : $json.report_type === 'marketing_monthly' ? 'marketing_crm' : 'executive_dashboard' }}' ORDER BY created_at DESC LIMIT 1",
+        "options": {}
+      },
+      "id": "get-report-data",
+      "name": "Get Report Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 500],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "functionCode": "const reportMeta = $node['Validate Token'].json;\nconst reportData = $input.first().json;\n\nif (!reportMeta.id) {\n  return [{ json: { error: true, html: '<h1>Report not found or expired</h1>' } }];\n}\n\nlet metrics = {};\ntry { metrics = JSON.parse(reportData.metrics || '{}'); } catch(e) {}\n\n// Update view count\nconst viewCount = (reportMeta.view_count || 0) + 1;\n\nconst html = `<!DOCTYPE html><html><head><title>${reportMeta.title} - ${reportMeta.company_name}</title><meta charset=\"utf-8\"><style>body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:800px;margin:0 auto;padding:20px;color:#333}h1{color:#0076D7}h2{border-bottom:2px solid #eee;padding-bottom:8px}.metric{display:inline-block;background:#f5f5f5;padding:15px 25px;margin:5px;border-radius:8px;text-align:center}.metric .value{font-size:24px;font-weight:bold;color:#0076D7}.metric .label{font-size:12px;color:#666;margin-top:4px}.footer{margin-top:40px;padding-top:20px;border-top:1px solid #eee;color:#999;font-size:12px}</style></head><body><h1>${reportMeta.title}</h1><p><strong>${reportMeta.company_name}</strong> | Generated: ${new Date().toLocaleDateString('id-ID')}</p><h2>Summary</h2><div>${JSON.stringify(metrics).substring(0, 500)}</div><div class=\"footer\"><p>Report generated by GreeVo | Expires: ${new Date(reportMeta.expires_at).toLocaleDateString('id-ID')}</p></div></body></html>`;\n\nreturn [{ json: { html, view_count: viewCount, report_id: reportMeta.id } }];"
+      },
+      "id": "render-report",
+      "name": "Render Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1130, 500]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.html }}",
+        "options": { "responseHeaders": { "entries": [{ "name": "Content-Type", "value": "text/html" }] } }
+      },
+      "id": "resp-report",
+      "name": "Resp Report HTML",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1350, 500]
+    }
+  ],
+  "connections": {
+    "Generate Report Link": { "main": [[{ "node": "Generate Token", "type": "main", "index": 0 }]] },
+    "Generate Token": { "main": [[{ "node": "Save Report Link", "type": "main", "index": 0 }]] },
+    "Save Report Link": { "main": [[{ "node": "Resp Generate", "type": "main", "index": 0 }]] },
+    "View Report": { "main": [[{ "node": "Extract Token", "type": "main", "index": 0 }]] },
+    "Extract Token": { "main": [[{ "node": "Validate Token", "type": "main", "index": 0 }]] },
+    "Validate Token": { "main": [[{ "node": "Get Report Data", "type": "main", "index": 0 }]] },
+    "Get Report Data": { "main": [[{ "node": "Render Report", "type": "main", "index": 0 }]] },
+    "Render Report": { "main": [[{ "node": "Resp Report HTML", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "SaaS" }, { "name": "Reports" }, { "name": "Shareable" }]
+}
