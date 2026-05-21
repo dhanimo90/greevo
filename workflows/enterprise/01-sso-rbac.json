@@ -1,0 +1,128 @@
+{
+  "name": "Enterprise - SSO & Role-Based Access Control",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "auth/sso/callback",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "sso-callback",
+      "name": "SSO Callback",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 200]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "auth/verify-token",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "verify-token",
+      "name": "Verify Token",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 500]
+    },
+    {
+      "parameters": {
+        "functionCode": "const crypto = require('crypto');\nconst input = $input.first().json;\nconst body = input.body || input;\n\n// Support SAML and OAuth2 callbacks\nconst ssoData = {\n  provider: body.provider || 'oauth2', // saml, oauth2, oidc\n  email: body.email || body.nameID || body.user_email,\n  name: body.name || body.displayName || '',\n  provider_user_id: body.sub || body.user_id || body.nameID,\n  groups: body.groups || body.roles || [],\n  raw_token: body.access_token || body.id_token || null,\n  client_id: body.client_id || body.state\n};\n\nif (!ssoData.email) return [{ json: { error: true, status: 401, message: 'SSO authentication failed' } }];\n\n// Generate session token\nconst sessionToken = crypto.randomBytes(48).toString('hex');\nconst expiresAt = new Date(Date.now() + 8 * 60 * 60 * 1000); // 8 hours\n\nreturn [{ json: { ...ssoData, session_token: sessionToken, expires_at: expiresAt.toISOString() } }];"
+      },
+      "id": "process-sso",
+      "name": "Process SSO",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO user_sessions (email, session_token, provider, provider_user_id, role, client_id, expires_at) SELECT '{{ $json.email }}', '{{ $json.session_token }}', '{{ $json.provider }}', '{{ $json.provider_user_id }}', COALESCE(u.role, 'viewer'), {{ $json.client_id || 'NULL' }}, '{{ $json.expires_at }}' FROM (SELECT '{{ $json.email }}' as email) e LEFT JOIN users u ON u.email = e.email RETURNING *",
+        "options": {}
+      },
+      "id": "create-session",
+      "name": "Create Session",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 200],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT log_audit({{ $json.client_id || 'NULL' }}, 'sso-auth', 'user_login', 'auth', NULL, '{\"email\": \"{{ $json.email }}\", \"provider\": \"{{ $json.provider }}\", \"role\": \"{{ $json.role || 'viewer' }}\"}'::jsonb, 'success')",
+        "options": {}
+      },
+      "id": "log-login",
+      "name": "Log Login",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 200],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": { "respondWith": "json", "responseBody": "={{ JSON.stringify({ success: true, session_token: $node['Process SSO'].json.session_token, expires_at: $node['Process SSO'].json.expires_at, role: $json.role || 'viewer', email: $node['Process SSO'].json.email }) }}" },
+      "id": "resp-sso",
+      "name": "Resp SSO",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1130, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\nconst token = body.token || (input.headers || {})['x-session-token'];\nif (!token) return [{ json: { valid: false, message: 'No token provided' } }];\nreturn [{ json: { token, required_role: body.required_role || 'viewer', resource: body.resource || '*' } }];"
+      },
+      "id": "parse-verify",
+      "name": "Parse Verify",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 500]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT us.email, us.role, us.client_id, us.expires_at, u.permissions FROM user_sessions us LEFT JOIN users u ON u.email = us.email WHERE us.session_token = '{{ $json.token }}' AND us.expires_at > NOW() AND us.is_active = true LIMIT 1",
+        "options": {}
+      },
+      "id": "check-session",
+      "name": "Check Session",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 500],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "functionCode": "const session = $input.first().json;\nconst request = $node['Parse Verify'].json;\n\nif (!session.email) {\n  return [{ json: { valid: false, message: 'Invalid or expired session' } }];\n}\n\n// Role hierarchy: admin > manager > editor > viewer\nconst roleHierarchy = { admin: 4, manager: 3, editor: 2, viewer: 1 };\nconst userLevel = roleHierarchy[session.role] || 1;\nconst requiredLevel = roleHierarchy[request.required_role] || 1;\n\nconst hasAccess = userLevel >= requiredLevel;\n\n// Parse permissions\nlet permissions = [];\ntry { permissions = JSON.parse(session.permissions || '[]'); } catch(e) {}\n\nreturn [{ json: {\n  valid: true,\n  authorized: hasAccess,\n  email: session.email,\n  role: session.role,\n  client_id: session.client_id,\n  permissions: permissions,\n  message: hasAccess ? 'Access granted' : `Insufficient permissions. Required: ${request.required_role}, Have: ${session.role}`\n}}];"
+      },
+      "id": "check-rbac",
+      "name": "Check RBAC",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 500]
+    },
+    {
+      "parameters": { "respondWith": "json", "responseBody": "={{ JSON.stringify($json) }}" },
+      "id": "resp-verify",
+      "name": "Resp Verify",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1130, 500]
+    }
+  ],
+  "connections": {
+    "SSO Callback": { "main": [[{ "node": "Process SSO", "type": "main", "index": 0 }]] },
+    "Process SSO": { "main": [[{ "node": "Create Session", "type": "main", "index": 0 }]] },
+    "Create Session": { "main": [[{ "node": "Log Login", "type": "main", "index": 0 }]] },
+    "Log Login": { "main": [[{ "node": "Resp SSO", "type": "main", "index": 0 }]] },
+    "Verify Token": { "main": [[{ "node": "Parse Verify", "type": "main", "index": 0 }]] },
+    "Parse Verify": { "main": [[{ "node": "Check Session", "type": "main", "index": 0 }]] },
+    "Check Session": { "main": [[{ "node": "Check RBAC", "type": "main", "index": 0 }]] },
+    "Check RBAC": { "main": [[{ "node": "Resp Verify", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Enterprise" }, { "name": "SSO" }, { "name": "RBAC" }]
+}

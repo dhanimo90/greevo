@@ -1,0 +1,131 @@
+{
+  "name": "Enterprise - Approval Workflows",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "approvals/request",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-request",
+      "name": "Request Approval",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 200]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "approvals/respond",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-respond",
+      "name": "Respond to Approval",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 500]
+    },
+    {
+      "parameters": {
+        "functionCode": "const crypto = require('crypto');\nconst input = $input.first().json;\nconst body = input.body || input;\n\nconst approvalId = 'APR-' + crypto.randomBytes(8).toString('hex');\n\n// Approval types: campaign_launch, budget_increase, deal_discount, data_export\nconst approvalChains = {\n  campaign_launch: ['marketing_manager', 'marketing_director'],\n  budget_increase: ['finance_manager', 'cfo'],\n  deal_discount: ['sales_manager'],\n  data_export: ['compliance_officer', 'cto'],\n  large_deal: ['sales_director', 'ceo']\n};\n\nconst type = body.approval_type || 'campaign_launch';\nconst chain = approvalChains[type] || ['manager'];\n\nreturn [{ json: {\n  approval_id: approvalId,\n  approval_type: type,\n  title: body.title || 'Approval Request',\n  description: body.description || '',\n  requested_by: body.requested_by,\n  client_id: body.client_id,\n  data: body.data || {},\n  approval_chain: chain,\n  current_step: 0,\n  status: 'pending',\n  expires_at: new Date(Date.now() + 72 * 60 * 60 * 1000).toISOString()\n}}];"
+      },
+      "id": "create-approval",
+      "name": "Create Approval",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO approval_requests (approval_id, approval_type, title, description, requested_by, client_id, approval_chain, current_step, status, data, expires_at) VALUES ('{{ $json.approval_id }}', '{{ $json.approval_type }}', '{{ $json.title }}', '{{ ($json.description || '').replace(/'/g, \"''\") }}', '{{ $json.requested_by }}', {{ $json.client_id || 'NULL' }}, '{{ JSON.stringify($json.approval_chain) }}'::jsonb, 0, 'pending', '{{ JSON.stringify($json.data) }}'::jsonb, '{{ $json.expires_at }}') RETURNING *",
+        "options": {}
+      },
+      "id": "save-approval",
+      "name": "Save Approval",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 200],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "channel": "#approvals",
+        "text": "📋 *Approval Request*\n\n*ID:* {{ $json.approval_id }}\n*Type:* {{ $json.approval_type }}\n*Title:* {{ $json.title }}\n*Requested By:* {{ $json.requested_by }}\n*Description:* {{ $json.description || 'N/A' }}\n*Approval Chain:* {{ $json.approval_chain.join(' → ') }}\n*Expires:* {{ $json.expires_at }}\n\n✅ Approve: `POST /webhook/approvals/respond` with `{\"approval_id\": \"{{ $json.approval_id }}\", \"decision\": \"approved\"}`\n❌ Reject: `{\"approval_id\": \"{{ $json.approval_id }}\", \"decision\": \"rejected\", \"reason\": \"...\"}`",
+        "options": {}
+      },
+      "id": "notify-approvers",
+      "name": "Notify Approvers",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [910, 200],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack Bot" } }
+    },
+    {
+      "parameters": { "respondWith": "json", "responseBody": "={{ JSON.stringify({ success: true, approval_id: $json.approval_id, status: 'pending', approval_chain: $json.approval_chain }) }}" },
+      "id": "resp-request",
+      "name": "Resp Request",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1130, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\nreturn [{ json: { approval_id: body.approval_id, decision: body.decision, reason: body.reason || '', decided_by: body.decided_by || 'unknown' } }];"
+      },
+      "id": "parse-response",
+      "name": "Parse Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 500]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE approval_requests SET status = '{{ $json.decision }}', current_step = current_step + 1, data = data || '{\"decision_by\": \"{{ $json.decided_by }}\", \"decision_reason\": \"{{ $json.reason }}\", \"decided_at\": \"{{ new Date().toISOString() }}\"}'::jsonb WHERE approval_id = '{{ $json.approval_id }}' AND status = 'pending' RETURNING *",
+        "options": {}
+      },
+      "id": "update-approval",
+      "name": "Update Approval",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 500],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "channel": "#approvals",
+        "text": "{{ $node['Parse Response'].json.decision === 'approved' ? '✅' : '❌' }} *Approval {{ $node['Parse Response'].json.decision.toUpperCase() }}*\n\n*ID:* {{ $node['Parse Response'].json.approval_id }}\n*Decision By:* {{ $node['Parse Response'].json.decided_by }}\n{{ $node['Parse Response'].json.reason ? '*Reason:* ' + $node['Parse Response'].json.reason : '' }}",
+        "options": {}
+      },
+      "id": "notify-decision",
+      "name": "Notify Decision",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [910, 500],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack Bot" } }
+    },
+    {
+      "parameters": { "respondWith": "json", "responseBody": "={{ JSON.stringify({ success: true, approval_id: $node['Parse Response'].json.approval_id, status: $node['Parse Response'].json.decision }) }}" },
+      "id": "resp-decision",
+      "name": "Resp Decision",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1130, 500]
+    }
+  ],
+  "connections": {
+    "Request Approval": { "main": [[{ "node": "Create Approval", "type": "main", "index": 0 }]] },
+    "Create Approval": { "main": [[{ "node": "Save Approval", "type": "main", "index": 0 }]] },
+    "Save Approval": { "main": [[{ "node": "Notify Approvers", "type": "main", "index": 0 }]] },
+    "Notify Approvers": { "main": [[{ "node": "Resp Request", "type": "main", "index": 0 }]] },
+    "Respond to Approval": { "main": [[{ "node": "Parse Response", "type": "main", "index": 0 }]] },
+    "Parse Response": { "main": [[{ "node": "Update Approval", "type": "main", "index": 0 }]] },
+    "Update Approval": { "main": [[{ "node": "Notify Decision", "type": "main", "index": 0 }]] },
+    "Notify Decision": { "main": [[{ "node": "Resp Decision", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Enterprise" }, { "name": "Approvals" }, { "name": "Governance" }]
+}
