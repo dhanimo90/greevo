@@ -1,0 +1,103 @@
+{
+  "name": "Marketing - Campaign ROI Tracking",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 6 * * 1" }]
+        }
+      },
+      "id": "weekly-monday-6am",
+      "name": "Monday 6 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT ec.id, ec.campaign_name, ec.campaign_type, ec.status, ec.client_id, ec.stats, ec.created_at, (SELECT COUNT(*) FROM lead_activities la WHERE la.activity_data->>'campaign_id' = ec.id::text AND la.activity_type LIKE '%email_sent%') as total_sent, (SELECT COUNT(*) FROM lead_activities la WHERE la.activity_data->>'campaign_id' = ec.id::text AND la.activity_type = 'email_opened') as total_opened, (SELECT COUNT(*) FROM lead_activities la WHERE la.activity_data->>'campaign_id' = ec.id::text AND la.activity_type = 'email_clicked') as total_clicked, (SELECT COUNT(DISTINCT la.contact_id) FROM lead_activities la WHERE la.activity_data->>'campaign_id' = ec.id::text AND la.activity_type = 'converted') as total_conversions, (SELECT COALESCE(SUM(d.deal_value), 0) FROM deals d JOIN lead_activities la ON la.contact_id = d.contact_id WHERE la.activity_data->>'campaign_id' = ec.id::text AND d.stage = 'closed_won') as revenue_attributed FROM email_campaigns ec WHERE ec.created_at > NOW() - INTERVAL '30 days' ORDER BY ec.created_at DESC",
+        "options": {}
+      },
+      "id": "get-campaign-data",
+      "name": "Get Campaign Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const campaigns = $input.all().map(i => i.json);\nif (!campaigns.length || !campaigns[0].id) return [{ json: { no_data: true } }];\n\n// Estimated cost per email (configurable)\nconst costPerEmail = 0.005; // $0.005 per email via SendGrid\nconst fixedMonthlyCost = 500000; // Rp 500k platform cost\n\nconst campaignResults = campaigns.map(c => {\n  const sent = parseInt(c.total_sent) || 0;\n  const opened = parseInt(c.total_opened) || 0;\n  const clicked = parseInt(c.total_clicked) || 0;\n  const conversions = parseInt(c.total_conversions) || 0;\n  const revenue = parseFloat(c.revenue_attributed) || 0;\n  \n  const cost = sent * costPerEmail * 15000; // Convert to IDR\n  const roi = cost > 0 ? ((revenue - cost) / cost * 100) : 0;\n  \n  return {\n    campaign_id: c.id,\n    campaign_name: c.campaign_name,\n    campaign_type: c.campaign_type,\n    status: c.status,\n    metrics: {\n      sent: sent,\n      opened: opened,\n      clicked: clicked,\n      conversions: conversions,\n      open_rate: sent > 0 ? (opened / sent * 100).toFixed(1) : '0',\n      click_rate: sent > 0 ? (clicked / sent * 100).toFixed(1) : '0',\n      conversion_rate: sent > 0 ? (conversions / sent * 100).toFixed(2) : '0'\n    },\n    financials: {\n      cost_idr: Math.round(cost),\n      revenue_idr: Math.round(revenue),\n      profit_idr: Math.round(revenue - cost),\n      roi_percent: Math.round(roi)\n    }\n  };\n});\n\n// Summary\nconst totalCost = campaignResults.reduce((sum, c) => sum + c.financials.cost_idr, 0) + fixedMonthlyCost;\nconst totalRevenue = campaignResults.reduce((sum, c) => sum + c.financials.revenue_idr, 0);\nconst totalConversions = campaignResults.reduce((sum, c) => sum + c.metrics.conversions, 0);\nconst overallROI = totalCost > 0 ? ((totalRevenue - totalCost) / totalCost * 100) : 0;\n\n// Top performers\nconst topByROI = [...campaignResults].filter(c => c.financials.revenue_idr > 0).sort((a, b) => b.financials.roi_percent - a.financials.roi_percent).slice(0, 5);\nconst topByConversions = [...campaignResults].sort((a, b) => b.metrics.conversions - a.metrics.conversions).slice(0, 5);\n\nreturn [{\n  json: {\n    period: 'Last 30 days',\n    summary: {\n      total_campaigns: campaignResults.length,\n      total_cost_idr: totalCost,\n      total_revenue_idr: totalRevenue,\n      total_profit_idr: totalRevenue - totalCost,\n      overall_roi_percent: Math.round(overallROI),\n      total_conversions: totalConversions,\n      cost_per_conversion: totalConversions > 0 ? Math.round(totalCost / totalConversions) : 0\n    },\n    top_by_roi: topByROI,\n    top_by_conversions: topByConversions,\n    all_campaigns: campaignResults\n  }\n}];"
+      },
+      "id": "calculate-roi",
+      "name": "Calculate ROI",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO analytics_snapshots (report_type, period_start, period_end, metrics, source) VALUES ('weekly', (NOW() - INTERVAL '7 days')::date, NOW()::date, '{{ JSON.stringify($json) }}'::jsonb, 'campaign_roi')",
+        "options": {}
+      },
+      "id": "save-roi-snapshot",
+      "name": "Save ROI Snapshot",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#marketing-reports",
+        "text": "💰 *Weekly Campaign ROI Report*\n📅 {{ $json.period }}\n\n━━━━━━━━━━━━━━━━━━━━\n📊 *SUMMARY*\n━━━━━━━━━━━━━━━━━━━━\n• Campaigns: {{ $json.summary.total_campaigns }}\n• Total Cost: Rp {{ $json.summary.total_cost_idr.toLocaleString('id-ID') }}\n• Total Revenue: Rp {{ $json.summary.total_revenue_idr.toLocaleString('id-ID') }}\n• Profit: Rp {{ $json.summary.total_profit_idr.toLocaleString('id-ID') }}\n• Overall ROI: {{ $json.summary.overall_roi_percent }}%\n• Conversions: {{ $json.summary.total_conversions }}\n• Cost/Conversion: Rp {{ $json.summary.cost_per_conversion.toLocaleString('id-ID') }}\n\n━━━━━━━━━━━━━━━━━━━━\n🏆 *TOP CAMPAIGNS (by ROI)*\n━━━━━━━━━━━━━━━━━━━━\n{{ $json.top_by_roi.map((c, i) => `${i+1}. ${c.campaign_name} — ROI: ${c.financials.roi_percent}% | Revenue: Rp ${c.financials.revenue_idr.toLocaleString('id-ID')}`).join('\\n') || 'No revenue-generating campaigns yet' }}\n\n━━━━━━━━━━━━━━━━━━━━\n🎯 *TOP CAMPAIGNS (by Conversions)*\n━━━━━━━━━━━━━━━━━━━━\n{{ $json.top_by_conversions.filter(c => c.metrics.conversions > 0).map((c, i) => `${i+1}. ${c.campaign_name} — ${c.metrics.conversions} conversions | CR: ${c.metrics.conversion_rate}%`).join('\\n') || 'No conversions yet' }}",
+        "options": {}
+      },
+      "id": "send-roi-report",
+      "name": "Send ROI Report",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1130, 300],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Monday 6 AM": {
+      "main": [[{ "node": "Get Campaign Data", "type": "main", "index": 0 }]]
+    },
+    "Get Campaign Data": {
+      "main": [[{ "node": "Calculate ROI", "type": "main", "index": 0 }]]
+    },
+    "Calculate ROI": {
+      "main": [[{ "node": "Save ROI Snapshot", "type": "main", "index": 0 }]]
+    },
+    "Save ROI Snapshot": {
+      "main": [[{ "node": "Send ROI Report", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "Marketing" },
+    { "name": "ROI" },
+    { "name": "Reporting" }
+  ]
+}

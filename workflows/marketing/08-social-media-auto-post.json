@@ -1,0 +1,244 @@
+{
+  "name": "Marketing - Social Media Auto-Posting",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "social/post",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-post",
+      "name": "Webhook - Create Post",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 9,13,17 * * 1-5" }]
+        }
+      },
+      "id": "schedule-posts",
+      "name": "Scheduled Posts (9AM, 1PM, 5PM)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 500]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM social_posts WHERE status = 'scheduled' AND scheduled_at <= NOW() ORDER BY scheduled_at ASC LIMIT 5",
+        "options": {}
+      },
+      "id": "get-scheduled-posts",
+      "name": "Get Scheduled Posts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 500],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\n\nconst platforms = body.platforms || ['linkedin'];\nconst content = body.content || '';\nconst mediaUrl = body.media_url || null;\n\n// Platform-specific formatting\nconst posts = [];\n\nfor (const platform of platforms) {\n  let formattedContent = content;\n  let maxLength = 3000;\n  \n  switch (platform) {\n    case 'twitter':\n      maxLength = 280;\n      formattedContent = content.substring(0, 277) + (content.length > 277 ? '...' : '');\n      break;\n    case 'linkedin':\n      maxLength = 3000;\n      // Add hashtags at the end for LinkedIn\n      if (body.hashtags?.length) {\n        formattedContent += '\\n\\n' + body.hashtags.map(h => `#${h}`).join(' ');\n      }\n      break;\n    case 'instagram':\n      maxLength = 2200;\n      if (body.hashtags?.length) {\n        formattedContent += '\\n\\n' + body.hashtags.map(h => `#${h}`).join(' ');\n      }\n      break;\n    case 'facebook':\n      maxLength = 63206;\n      break;\n  }\n\n  posts.push({\n    json: {\n      platform: platform,\n      content: formattedContent.substring(0, maxLength),\n      media_url: mediaUrl,\n      link_url: body.link_url || null,\n      client_id: body.client_id,\n      campaign_id: body.campaign_id || null,\n      scheduled_at: body.scheduled_at || new Date().toISOString()\n    }\n  });\n}\n\nreturn posts;"
+      },
+      "id": "format-posts",
+      "name": "Format Per Platform",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.platform }}",
+              "operation": "equal",
+              "value2": "linkedin"
+            }
+          ]
+        }
+      },
+      "id": "is-linkedin",
+      "name": "Platform Router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.linkedin.com/v2/ugcPosts",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "body",
+              "value": "={{ JSON.stringify({ author: 'urn:li:organization:' + $env.LINKEDIN_ORG_ID, lifecycleState: 'PUBLISHED', specificContent: { 'com.linkedin.ugc.ShareContent': { shareCommentary: { text: $json.content }, shareMediaCategory: $json.media_url ? 'IMAGE' : 'NONE' } }, visibility: { 'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC' } }) }}"
+            }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "post-linkedin",
+      "name": "Post to LinkedIn",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [910, 200],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "linkedin-oauth",
+          "name": "LinkedIn OAuth2"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "https://graph.facebook.com/v18.0/{{ $env.TWITTER_PAGE_ID || 'me' }}/feed",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "message", "value": "={{ $json.content }}" },
+            { "name": "link", "value": "={{ $json.link_url || '' }}" }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "post-facebook",
+      "name": "Post to Facebook",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [910, 350],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "facebook-oauth",
+          "name": "Facebook OAuth2"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "https://api.twitter.com/2/tweets",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "body",
+              "value": "={{ JSON.stringify({ text: $json.content }) }}"
+            }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "post-twitter",
+      "name": "Post to Twitter/X",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [910, 500],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "twitter-oauth",
+          "name": "Twitter OAuth2"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "functionCode": "const results = $input.all();\nconst postData = $node['Format Per Platform'].json;\n\nconst postResult = results[0]?.json || {};\nconst success = !postResult.error && postResult.statusCode !== 401;\n\nreturn [{\n  json: {\n    platform: postData.platform,\n    success: success,\n    post_id: postResult.id || postResult.data?.id || null,\n    client_id: postData.client_id,\n    content_preview: postData.content.substring(0, 100),\n    posted_at: new Date().toISOString(),\n    error: success ? null : (postResult.message || postResult.error || 'Unknown error')\n  }\n}];"
+      },
+      "id": "collect-results",
+      "name": "Collect Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1130, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT log_audit({{ $json.client_id || 'NULL' }}, 'social-media-post', 'social_post_{{ $json.success ? 'published' : 'failed' }}', 'social', NULL, '{{ JSON.stringify({platform: $json.platform, post_id: $json.post_id, content_preview: $json.content_preview}) }}'::jsonb, '{{ $json.success ? 'success' : 'error' }}', {{ $json.error ? \"'\" + $json.error.replace(/'/g, \"''\") + \"'\" : 'NULL' }})",
+        "options": {}
+      },
+      "id": "log-post",
+      "name": "Log Post",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1350, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: $json.success, platform: $json.platform, post_id: $json.post_id, error: $json.error }) }}"
+      },
+      "id": "response-result",
+      "name": "Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1570, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Create Post": {
+      "main": [[{ "node": "Format Per Platform", "type": "main", "index": 0 }]]
+    },
+    "Scheduled Posts (9AM, 1PM, 5PM)": {
+      "main": [[{ "node": "Get Scheduled Posts", "type": "main", "index": 0 }]]
+    },
+    "Get Scheduled Posts": {
+      "main": [[{ "node": "Format Per Platform", "type": "main", "index": 0 }]]
+    },
+    "Format Per Platform": {
+      "main": [[
+        { "node": "Post to LinkedIn", "type": "main", "index": 0 },
+        { "node": "Post to Facebook", "type": "main", "index": 0 },
+        { "node": "Post to Twitter/X", "type": "main", "index": 0 }
+      ]]
+    },
+    "Post to LinkedIn": {
+      "main": [[{ "node": "Collect Results", "type": "main", "index": 0 }]]
+    },
+    "Post to Facebook": {
+      "main": [[{ "node": "Collect Results", "type": "main", "index": 0 }]]
+    },
+    "Post to Twitter/X": {
+      "main": [[{ "node": "Collect Results", "type": "main", "index": 0 }]]
+    },
+    "Collect Results": {
+      "main": [[{ "node": "Log Post", "type": "main", "index": 0 }]]
+    },
+    "Log Post": {
+      "main": [[{ "node": "Response", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "Marketing" },
+    { "name": "Social Media" },
+    { "name": "Multi-Channel" }
+  ]
+}

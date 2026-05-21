@@ -1,0 +1,158 @@
+{
+  "name": "Marketing - Event-Triggered Campaigns",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 8 * * *" }]
+        }
+      },
+      "id": "daily-8am",
+      "name": "Daily 8 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.id, c.email, c.first_name, c.last_name, c.company, c.client_id, c.custom_fields, c.created_at, 'birthday' as event_type, c.custom_fields->>'birthday' as event_date FROM contacts c WHERE c.lead_status NOT IN ('lost') AND c.custom_fields->>'birthday' IS NOT NULL AND TO_CHAR(NOW(), 'MM-DD') = SUBSTRING(c.custom_fields->>'birthday', 6, 5) UNION ALL SELECT c.id, c.email, c.first_name, c.last_name, c.company, c.client_id, c.custom_fields, c.created_at, 'anniversary' as event_type, c.created_at::text as event_date FROM contacts c WHERE c.lead_status NOT IN ('lost') AND TO_CHAR(c.created_at, 'MM-DD') = TO_CHAR(NOW(), 'MM-DD') AND c.created_at < NOW() - INTERVAL '365 days' UNION ALL SELECT c.id, c.email, c.first_name, c.last_name, c.company, c.client_id, c.custom_fields, c.created_at, 'trial_expiring' as event_type, c.custom_fields->>'trial_end_date' as event_date FROM contacts c WHERE c.lead_status = 'opportunity' AND c.custom_fields->>'trial_end_date' IS NOT NULL AND (c.custom_fields->>'trial_end_date')::date = CURRENT_DATE + INTERVAL '3 days'",
+        "options": {}
+      },
+      "id": "find-events",
+      "name": "Find Today's Events",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const events = $input.all().map(i => i.json);\nif (!events.length || !events[0].id) return [];\n\nconst results = [];\n\nfor (const event of events) {\n  let subject, templateId, scoreImpact;\n  \n  switch (event.event_type) {\n    case 'birthday':\n      subject = `🎂 Happy Birthday, ${event.first_name || 'there'}! Here's a special gift`;\n      templateId = 'd-event-birthday';\n      scoreImpact = 5;\n      break;\n    case 'anniversary':\n      const years = Math.floor((Date.now() - new Date(event.created_at).getTime()) / (365.25 * 24 * 60 * 60 * 1000));\n      subject = `🎉 ${event.first_name || 'Hi'}, it's been ${years} year${years > 1 ? 's' : ''}! Thank you`;\n      templateId = 'd-event-anniversary';\n      scoreImpact = 3;\n      break;\n    case 'trial_expiring':\n      subject = `⏰ ${event.first_name || 'Hi'}, your trial expires in 3 days`;\n      templateId = 'd-event-trial-expiring';\n      scoreImpact = 10;\n      break;\n    default:\n      subject = `${event.first_name || 'Hi'}, we have something for you`;\n      templateId = 'd-event-generic';\n      scoreImpact = 2;\n  }\n\n  results.push({\n    json: {\n      ...event,\n      email_subject: subject,\n      template_id: templateId,\n      score_impact: scoreImpact\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "prepare-campaigns",
+      "name": "Prepare Event Campaigns",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "hello@{{ $env.COMPANY_DOMAIN }}",
+        "toEmail": "={{ $json.email }}",
+        "subject": "={{ $json.email_subject }}",
+        "contentType": "html",
+        "content": "",
+        "options": {
+          "templateId": "={{ $json.template_id }}",
+          "dynamicTemplateData": {
+            "first_name": "={{ $json.first_name }}",
+            "company": "={{ $json.company }}",
+            "event_type": "={{ $json.event_type }}"
+          }
+        }
+      },
+      "id": "send-event-email",
+      "name": "Send Event Email",
+      "type": "n8n-nodes-base.sendGrid",
+      "typeVersion": 1,
+      "position": [910, 300],
+      "credentials": {
+        "sendGridApi": {
+          "id": "sendgrid-cred",
+          "name": "SendGrid API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) VALUES ({{ $json.id }}, 'event_email_sent', '{\"event_type\": \"{{ $json.event_type }}\", \"template\": \"{{ $json.template_id }}\"}'::jsonb, {{ $json.score_impact }}); UPDATE contacts SET lead_score = lead_score + {{ $json.score_impact }} WHERE id = {{ $json.id }};",
+        "options": {}
+      },
+      "id": "log-event-email",
+      "name": "Log & Score",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.event_type }}",
+              "operation": "equal",
+              "value2": "trial_expiring"
+            }
+          ]
+        }
+      },
+      "id": "is-trial-expiring",
+      "name": "Is Trial Expiring?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1350, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#sales-leads",
+        "text": "⏰ *Trial Expiring - Action Needed*\n\n*Contact:* {{ $json.first_name }} {{ $json.last_name }}\n*Company:* {{ $json.company }}\n*Email:* {{ $json.email }}\n*Trial Ends:* {{ $json.event_date }}\n\nReach out to convert before trial expires!",
+        "options": {}
+      },
+      "id": "notify-sales-trial",
+      "name": "Notify Sales",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1570, 200],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 8 AM": {
+      "main": [[{ "node": "Find Today's Events", "type": "main", "index": 0 }]]
+    },
+    "Find Today's Events": {
+      "main": [[{ "node": "Prepare Event Campaigns", "type": "main", "index": 0 }]]
+    },
+    "Prepare Event Campaigns": {
+      "main": [[{ "node": "Send Event Email", "type": "main", "index": 0 }]]
+    },
+    "Send Event Email": {
+      "main": [[{ "node": "Log & Score", "type": "main", "index": 0 }]]
+    },
+    "Log & Score": {
+      "main": [[{ "node": "Is Trial Expiring?", "type": "main", "index": 0 }]]
+    },
+    "Is Trial Expiring?": {
+      "main": [
+        [{ "node": "Notify Sales", "type": "main", "index": 0 }],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "Marketing" },
+    { "name": "Event-Triggered" },
+    { "name": "Automation" }
+  ]
+}

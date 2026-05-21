@@ -1,0 +1,166 @@
+{
+  "name": "Marketing - A/B Testing Email Subject Lines",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ab-test/create",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-create-test",
+      "name": "Webhook - Create A/B Test",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\n\n// Validate\nif (!body.campaign_name || !body.variants || body.variants.length < 2) {\n  return [{ json: { error: true, message: 'Need campaign_name and at least 2 variants' } }];\n}\n\nconst testId = `ab_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;\nconst totalAudience = body.audience_size || 1000;\nconst testPercentage = body.test_percentage || 20; // 20% for testing\nconst testAudience = Math.floor(totalAudience * testPercentage / 100);\nconst perVariant = Math.floor(testAudience / body.variants.length);\n\nconst variants = body.variants.map((v, i) => ({\n  variant_id: `${testId}_v${i}`,\n  variant_label: String.fromCharCode(65 + i), // A, B, C...\n  subject_line: v.subject_line,\n  preview_text: v.preview_text || '',\n  template_id: v.template_id || body.default_template_id,\n  audience_size: perVariant,\n  stats: { sent: 0, opened: 0, clicked: 0, converted: 0 }\n}));\n\nreturn [{\n  json: {\n    test_id: testId,\n    campaign_name: body.campaign_name,\n    client_id: body.client_id,\n    variants: variants,\n    total_audience: totalAudience,\n    test_audience: testAudience,\n    remaining_audience: totalAudience - testAudience,\n    test_percentage: testPercentage,\n    winning_metric: body.winning_metric || 'open_rate', // open_rate, click_rate, conversion_rate\n    test_duration_hours: body.test_duration_hours || 24,\n    status: 'created',\n    from_email: body.from_email || 'marketing@company.com',\n    segment_criteria: body.segment_criteria || {},\n    created_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "setup-test",
+      "name": "Setup A/B Test",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO email_campaigns (campaign_name, campaign_type, status, subject_line, segment_criteria, client_id, stats) VALUES ('{{ $json.campaign_name }}', 'ab_test', 'active', '{{ JSON.stringify($json.variants.map(v => v.subject_line)) }}', '{{ JSON.stringify({test_id: $json.test_id, variants: $json.variants, winning_metric: $json.winning_metric, test_duration_hours: $json.test_duration_hours}) }}'::jsonb, {{ $json.client_id || 'NULL' }}, '{{ JSON.stringify({test_audience: $json.test_audience, remaining: $json.remaining_audience, status: \"testing\"}) }}'::jsonb) RETURNING id",
+        "options": {}
+      },
+      "id": "save-campaign",
+      "name": "Save Campaign",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.id, c.email, c.first_name FROM contacts c WHERE c.lead_status NOT IN ('lost') {{ $node['Setup A/B Test'].json.client_id ? 'AND c.client_id = ' + $node['Setup A/B Test'].json.client_id : '' }} ORDER BY RANDOM() LIMIT {{ $node['Setup A/B Test'].json.test_audience }}",
+        "options": {}
+      },
+      "id": "get-test-audience",
+      "name": "Get Test Audience",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const contacts = $input.all().map(i => i.json);\nconst testConfig = $node['Setup A/B Test'].json;\nconst variants = testConfig.variants;\nconst perVariant = Math.floor(contacts.length / variants.length);\n\nconst results = [];\n\nfor (let i = 0; i < variants.length; i++) {\n  const start = i * perVariant;\n  const end = i === variants.length - 1 ? contacts.length : start + perVariant;\n  const variantContacts = contacts.slice(start, end);\n  \n  for (const contact of variantContacts) {\n    results.push({\n      json: {\n        contact_id: contact.id,\n        email: contact.email,\n        first_name: contact.first_name,\n        variant_id: variants[i].variant_id,\n        variant_label: variants[i].variant_label,\n        subject_line: variants[i].subject_line.replace('{{first_name}}', contact.first_name || 'there'),\n        preview_text: variants[i].preview_text,\n        template_id: variants[i].template_id,\n        test_id: testConfig.test_id,\n        from_email: testConfig.from_email\n      }\n    });\n  }\n}\n\nreturn results;"
+      },
+      "id": "split-variants",
+      "name": "Split Into Variants",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1130, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $json.from_email }}",
+        "toEmail": "={{ $json.email }}",
+        "subject": "={{ $json.subject_line }}",
+        "contentType": "html",
+        "content": "",
+        "options": {
+          "templateId": "={{ $json.template_id }}",
+          "dynamicTemplateData": {
+            "first_name": "={{ $json.first_name }}",
+            "variant_id": "={{ $json.variant_id }}",
+            "test_id": "={{ $json.test_id }}"
+          },
+          "customArgs": {
+            "test_id": "={{ $json.test_id }}",
+            "variant_id": "={{ $json.variant_id }}"
+          }
+        }
+      },
+      "id": "send-variant-email",
+      "name": "Send Variant Email",
+      "type": "n8n-nodes-base.sendGrid",
+      "typeVersion": 1,
+      "position": [1350, 300],
+      "credentials": {
+        "sendGridApi": {
+          "id": "sendgrid-cred",
+          "name": "SendGrid API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) VALUES ({{ $json.contact_id }}, 'ab_test_email_sent', '{\"test_id\": \"{{ $json.test_id }}\", \"variant_id\": \"{{ $json.variant_id }}\", \"variant_label\": \"{{ $json.variant_label }}\"}'::jsonb, 0)",
+        "options": {}
+      },
+      "id": "log-send",
+      "name": "Log Send",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1570, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, test_id: $node['Setup A/B Test'].json.test_id, variants: $node['Setup A/B Test'].json.variants.length, test_audience: $node['Setup A/B Test'].json.test_audience, message: 'A/B test started. Winner will be determined after ' + $node['Setup A/B Test'].json.test_duration_hours + ' hours.' }) }}"
+      },
+      "id": "response-ok",
+      "name": "Response OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1790, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Create A/B Test": {
+      "main": [[{ "node": "Setup A/B Test", "type": "main", "index": 0 }]]
+    },
+    "Setup A/B Test": {
+      "main": [[{ "node": "Save Campaign", "type": "main", "index": 0 }]]
+    },
+    "Save Campaign": {
+      "main": [[{ "node": "Get Test Audience", "type": "main", "index": 0 }]]
+    },
+    "Get Test Audience": {
+      "main": [[{ "node": "Split Into Variants", "type": "main", "index": 0 }]]
+    },
+    "Split Into Variants": {
+      "main": [[{ "node": "Send Variant Email", "type": "main", "index": 0 }]]
+    },
+    "Send Variant Email": {
+      "main": [[{ "node": "Log Send", "type": "main", "index": 0 }]]
+    },
+    "Log Send": {
+      "main": [[{ "node": "Response OK", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "Marketing" },
+    { "name": "A/B Testing" },
+    { "name": "Email" }
+  ]
+}

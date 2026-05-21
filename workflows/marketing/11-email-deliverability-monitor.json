@@ -1,0 +1,189 @@
+{
+  "name": "Marketing - Email Deliverability Monitor",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 7 * * *" }]
+        }
+      },
+      "id": "daily-7am",
+      "name": "Daily 7 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.sendgrid.com/v3/stats",
+        "method": "GET",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "start_date", "value": "={{ new Date(Date.now() - 24*60*60*1000).toISOString().split('T')[0] }}" },
+            { "name": "end_date", "value": "={{ new Date().toISOString().split('T')[0] }}" }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "get-sendgrid-stats",
+      "name": "Get SendGrid Stats",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [470, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sendgrid-header-cred",
+          "name": "SendGrid Header Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.sendgrid.com/v3/suppression/bounces",
+        "method": "GET",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "start_time", "value": "={{ Math.floor((Date.now() - 24*60*60*1000) / 1000) }}" }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "get-bounces",
+      "name": "Get Recent Bounces",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [470, 400],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sendgrid-header-cred",
+          "name": "SendGrid Header Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const statsResponse = $node['Get SendGrid Stats'].json;\nconst bouncesResponse = $node['Get Recent Bounces'].json;\n\n// Parse stats\nconst stats = Array.isArray(statsResponse) ? statsResponse : [statsResponse];\nlet totalSent = 0, totalDelivered = 0, totalOpened = 0;\nlet totalBounced = 0, totalSpamReports = 0, totalBlocked = 0;\n\nfor (const day of stats) {\n  const metrics = day.stats?.[0]?.metrics || day.metrics || {};\n  totalSent += metrics.requests || 0;\n  totalDelivered += metrics.delivered || 0;\n  totalOpened += metrics.unique_opens || 0;\n  totalBounced += (metrics.bounces || 0) + (metrics.bounce_drops || 0);\n  totalSpamReports += metrics.spam_reports || 0;\n  totalBlocked += metrics.blocks || 0;\n}\n\n// Calculate rates\nconst deliveryRate = totalSent > 0 ? (totalDelivered / totalSent * 100) : 0;\nconst openRate = totalDelivered > 0 ? (totalOpened / totalDelivered * 100) : 0;\nconst bounceRate = totalSent > 0 ? (totalBounced / totalSent * 100) : 0;\nconst spamRate = totalDelivered > 0 ? (totalSpamReports / totalDelivered * 100) : 0;\n\n// Health assessment\nlet healthStatus = 'healthy';\nconst issues = [];\n\nif (deliveryRate < 95) {\n  healthStatus = 'warning';\n  issues.push(`Low delivery rate: ${deliveryRate.toFixed(1)}% (target: >95%)`);\n}\nif (bounceRate > 5) {\n  healthStatus = 'critical';\n  issues.push(`High bounce rate: ${bounceRate.toFixed(1)}% (target: <5%)`);\n}\nif (spamRate > 0.1) {\n  healthStatus = 'critical';\n  issues.push(`High spam rate: ${spamRate.toFixed(3)}% (target: <0.1%)`);\n}\nif (openRate < 15) {\n  issues.push(`Low open rate: ${openRate.toFixed(1)}% (benchmark: >20%)`);\n  if (healthStatus === 'healthy') healthStatus = 'warning';\n}\n\n// Parse bounces\nconst bounces = Array.isArray(bouncesResponse) ? bouncesResponse : [];\nconst hardBounces = bounces.filter(b => b.status?.startsWith('5'));\n\nreturn [{\n  json: {\n    date: new Date(Date.now() - 24*60*60*1000).toISOString().split('T')[0],\n    metrics: {\n      sent: totalSent,\n      delivered: totalDelivered,\n      opened: totalOpened,\n      bounced: totalBounced,\n      spam_reports: totalSpamReports,\n      blocked: totalBlocked\n    },\n    rates: {\n      delivery_rate: Math.round(deliveryRate * 10) / 10,\n      open_rate: Math.round(openRate * 10) / 10,\n      bounce_rate: Math.round(bounceRate * 10) / 10,\n      spam_rate: Math.round(spamRate * 1000) / 1000\n    },\n    health_status: healthStatus,\n    issues: issues,\n    hard_bounces_count: hardBounces.length,\n    hard_bounce_emails: hardBounces.slice(0, 10).map(b => b.email)\n  }\n}];"
+      },
+      "id": "analyze-deliverability",
+      "name": "Analyze Deliverability",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO analytics_snapshots (report_type, period_start, period_end, metrics, source) VALUES ('daily', '{{ $json.date }}', '{{ $json.date }}', '{{ JSON.stringify($json) }}'::jsonb, 'email_deliverability')",
+        "options": {}
+      },
+      "id": "save-metrics",
+      "name": "Save Metrics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.health_status }}",
+              "operation": "notEqual",
+              "value2": "healthy"
+            }
+          ]
+        }
+      },
+      "id": "has-issues",
+      "name": "Has Issues?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1130, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#marketing-alerts",
+        "text": "{{ $json.health_status === 'critical' ? '🚨' : '⚠️' }} *Email Deliverability {{ $json.health_status === 'critical' ? 'CRITICAL' : 'Warning' }}*\n\n📅 *Date:* {{ $json.date }}\n\n*Metrics:*\n• Sent: {{ $json.metrics.sent.toLocaleString() }}\n• Delivered: {{ $json.metrics.delivered.toLocaleString() }}\n• Opened: {{ $json.metrics.opened.toLocaleString() }}\n• Bounced: {{ $json.metrics.bounced }}\n• Spam Reports: {{ $json.metrics.spam_reports }}\n\n*Rates:*\n• Delivery: {{ $json.rates.delivery_rate }}%\n• Open: {{ $json.rates.open_rate }}%\n• Bounce: {{ $json.rates.bounce_rate }}%\n• Spam: {{ $json.rates.spam_rate }}%\n\n*Issues:*\n{{ $json.issues.map(i => `• ${i}`).join('\\n') }}\n\n{{ $json.hard_bounces_count > 0 ? `*Hard Bounces (${$json.hard_bounces_count}):* Clean these from your list` : '' }}",
+        "options": {}
+      },
+      "id": "alert-deliverability",
+      "name": "Alert Deliverability Issue",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1350, 200],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE contacts SET lead_status = 'lost', custom_fields = custom_fields || '{\"hard_bounced\": true, \"bounced_at\": \"{{ new Date().toISOString() }}\"}'::jsonb WHERE email = ANY(ARRAY[{{ $json.hard_bounce_emails.map(e => \"'\" + e + \"'\").join(',') || \"''\" }}])",
+        "options": {}
+      },
+      "id": "mark-hard-bounces",
+      "name": "Mark Hard Bounces",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1350, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 7 AM": {
+      "main": [[
+        { "node": "Get SendGrid Stats", "type": "main", "index": 0 },
+        { "node": "Get Recent Bounces", "type": "main", "index": 0 }
+      ]]
+    },
+    "Get SendGrid Stats": {
+      "main": [[{ "node": "Analyze Deliverability", "type": "main", "index": 0 }]]
+    },
+    "Get Recent Bounces": {
+      "main": [[{ "node": "Analyze Deliverability", "type": "main", "index": 0 }]]
+    },
+    "Analyze Deliverability": {
+      "main": [[{ "node": "Save Metrics", "type": "main", "index": 0 }]]
+    },
+    "Save Metrics": {
+      "main": [[{ "node": "Has Issues?", "type": "main", "index": 0 }]]
+    },
+    "Has Issues?": {
+      "main": [
+        [
+          { "node": "Alert Deliverability Issue", "type": "main", "index": 0 },
+          { "node": "Mark Hard Bounces", "type": "main", "index": 0 }
+        ],
+        []
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "Marketing" },
+    { "name": "Deliverability" },
+    { "name": "Monitoring" }
+  ]
+}

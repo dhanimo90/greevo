@@ -1,0 +1,222 @@
+{
+  "name": "Marketing - WhatsApp & SMS Integration",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "messaging/send",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-send-msg",
+      "name": "Webhook - Send Message",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\n\nconst validChannels = ['whatsapp', 'sms'];\nif (!validChannels.includes(body.channel)) {\n  return [{ json: { error: true, message: 'Invalid channel. Use: whatsapp or sms' } }];\n}\n\nif (!body.phone && !body.contact_id) {\n  return [{ json: { error: true, message: 'Provide phone or contact_id' } }];\n}\n\nreturn [{ json: {\n  channel: body.channel,\n  contact_id: body.contact_id,\n  phone: body.phone,\n  template_name: body.template_name,\n  message: body.message,\n  variables: body.variables || {},\n  client_id: body.client_id,\n  campaign_type: body.campaign_type || 'transactional'\n}}];"
+      },
+      "id": "validate-request",
+      "name": "Validate Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.contact_id }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "has-contact-id",
+      "name": "Has Contact ID?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, phone, first_name, email FROM contacts WHERE id = {{ $json.contact_id }}",
+        "options": {}
+      },
+      "id": "get-contact-phone",
+      "name": "Get Contact Phone",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 250],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const contact = $input.first().json;\nconst request = $node['Validate Request'].json;\n\nreturn [{\n  json: {\n    ...request,\n    phone: contact.phone || request.phone,\n    first_name: contact.first_name,\n    contact_id: contact.id\n  }\n}];"
+      },
+      "id": "merge-contact",
+      "name": "Merge Contact Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1130, 250]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.channel }}",
+              "operation": "equal",
+              "value2": "whatsapp"
+            }
+          ]
+        }
+      },
+      "id": "channel-switch",
+      "name": "WhatsApp or SMS?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1350, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://graph.facebook.com/v18.0/{{ $env.WHATSAPP_PHONE_ID }}/messages",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "body",
+              "value": "={{ JSON.stringify({ messaging_product: 'whatsapp', to: $json.phone.replace(/[^0-9]/g, ''), type: $json.template_name ? 'template' : 'text', ...$json.template_name ? { template: { name: $json.template_name, language: { code: 'id' }, components: [{ type: 'body', parameters: Object.values($json.variables || {}).map(v => ({ type: 'text', text: v })) }] } } : { text: { body: $json.message } } }) }}"
+            }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "send-whatsapp",
+      "name": "Send WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1570, 200],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "whatsapp-cred",
+          "name": "WhatsApp Business API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.twilio.com/2010-04-01/Accounts/{{ $env.TWILIO_ACCOUNT_SID }}/Messages.json",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "To", "value": "={{ $json.phone }}" },
+            { "name": "From", "value": "={{ $env.TWILIO_PHONE_NUMBER }}" },
+            { "name": "Body", "value": "={{ $json.message || `Hi ${$json.first_name || 'there'}, ${$json.variables?.message || 'You have a new notification from GreeVo.'}` }}" }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "send-sms",
+      "name": "Send SMS (Twilio)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1570, 400],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "twilio-cred",
+          "name": "Twilio API"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) VALUES ({{ $node['Merge Contact Data'].json.contact_id || $node['Validate Request'].json.contact_id || 'NULL' }}, '{{ $node['Validate Request'].json.channel }}_sent', '{\"channel\": \"{{ $node['Validate Request'].json.channel }}\", \"template\": \"{{ $node['Validate Request'].json.template_name || 'custom' }}\", \"campaign_type\": \"{{ $node['Validate Request'].json.campaign_type }}\"}'::jsonb, 2)",
+        "options": {}
+      },
+      "id": "log-message",
+      "name": "Log Message Sent",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1790, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, channel: $node['Validate Request'].json.channel, phone: $node['Merge Contact Data'].json.phone || $node['Validate Request'].json.phone }) }}"
+      },
+      "id": "response-ok",
+      "name": "Response OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2010, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Send Message": {
+      "main": [[{ "node": "Validate Request", "type": "main", "index": 0 }]]
+    },
+    "Validate Request": {
+      "main": [[{ "node": "Has Contact ID?", "type": "main", "index": 0 }]]
+    },
+    "Has Contact ID?": {
+      "main": [
+        [{ "node": "Get Contact Phone", "type": "main", "index": 0 }],
+        [{ "node": "WhatsApp or SMS?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Get Contact Phone": {
+      "main": [[{ "node": "Merge Contact Data", "type": "main", "index": 0 }]]
+    },
+    "Merge Contact Data": {
+      "main": [[{ "node": "WhatsApp or SMS?", "type": "main", "index": 0 }]]
+    },
+    "WhatsApp or SMS?": {
+      "main": [
+        [{ "node": "Send WhatsApp", "type": "main", "index": 0 }],
+        [{ "node": "Send SMS (Twilio)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Send WhatsApp": {
+      "main": [[{ "node": "Log Message Sent", "type": "main", "index": 0 }]]
+    },
+    "Send SMS (Twilio)": {
+      "main": [[{ "node": "Log Message Sent", "type": "main", "index": 0 }]]
+    },
+    "Log Message Sent": {
+      "main": [[{ "node": "Response OK", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "Marketing" },
+    { "name": "WhatsApp" },
+    { "name": "SMS" },
+    { "name": "Multi-Channel" }
+  ]
+}

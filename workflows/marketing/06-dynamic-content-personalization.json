@@ -1,0 +1,76 @@
+{
+  "name": "Marketing - Dynamic Content Personalization",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "personalize/email",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-personalize",
+      "name": "Webhook - Personalize",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.*, c.custom_fields, c.tags, c.lead_score, c.lead_status, (SELECT json_agg(json_build_object('type', la.activity_type, 'data', la.activity_data, 'at', la.created_at)) FROM lead_activities la WHERE la.contact_id = c.id ORDER BY la.created_at DESC LIMIT 20) as recent_activities, (SELECT COUNT(*) FROM lead_activities la WHERE la.contact_id = c.id AND la.activity_type = 'email_opened' AND la.created_at > NOW() - INTERVAL '30 days') as opens_30d, (SELECT COUNT(*) FROM lead_activities la WHERE la.contact_id = c.id AND la.activity_type = 'email_clicked' AND la.created_at > NOW() - INTERVAL '30 days') as clicks_30d, (SELECT COUNT(*) FROM lead_activities la WHERE la.contact_id = c.id AND la.activity_type = 'page_view' AND la.created_at > NOW() - INTERVAL '30 days') as pageviews_30d FROM contacts c WHERE c.id = {{ $json.body.contact_id || $json.contact_id }}",
+        "options": {}
+      },
+      "id": "get-contact-profile",
+      "name": "Get Contact Profile",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const contact = $input.first().json;\nconst request = $node['Webhook - Personalize'].json.body || $node['Webhook - Personalize'].json;\n\n// Behavior-based segmentation\nconst engagement = {\n  opens: contact.opens_30d || 0,\n  clicks: contact.clicks_30d || 0,\n  pageviews: contact.pageviews_30d || 0\n};\n\n// Determine engagement level\nlet engagementLevel = 'cold';\nif (engagement.opens > 5 && engagement.clicks > 2) engagementLevel = 'hot';\nelse if (engagement.opens > 2 || engagement.clicks > 0) engagementLevel = 'warm';\n\n// Determine content preferences from activity\nconst activities = contact.recent_activities || [];\nconst contentPreferences = [];\nfor (const act of activities) {\n  if (act?.data?.content_type) contentPreferences.push(act.data.content_type);\n  if (act?.data?.page_category) contentPreferences.push(act.data.page_category);\n}\nconst topPreference = contentPreferences.length > 0 \n  ? contentPreferences.sort((a, b) => contentPreferences.filter(v => v === b).length - contentPreferences.filter(v => v === a).length)[0]\n  : 'general';\n\n// Determine best CTA based on funnel stage\nlet cta = { text: 'Learn More', url: '/resources', style: 'soft' };\nif (contact.lead_score >= 70) {\n  cta = { text: 'Schedule a Demo', url: '/demo', style: 'hard' };\n} else if (contact.lead_score >= 40) {\n  cta = { text: 'See Case Studies', url: '/case-studies', style: 'medium' };\n} else if (contact.lead_score >= 20) {\n  cta = { text: 'Download Free Guide', url: '/resources/guide', style: 'soft' };\n}\n\n// Determine tone\nlet tone = 'professional';\nif (contact.custom_fields?.industry === 'startup' || contact.custom_fields?.company_size === '1-10') {\n  tone = 'casual';\n} else if (contact.custom_fields?.industry === 'enterprise' || contact.custom_fields?.company_size === '500+') {\n  tone = 'formal';\n}\n\n// Product recommendations based on behavior\nconst recommendations = [];\nif (topPreference === 'seo' || contact.tags?.includes('seo')) {\n  recommendations.push({ name: 'SEO Monitoring', description: 'Track your rankings daily' });\n}\nif (topPreference === 'marketing' || contact.tags?.includes('marketing')) {\n  recommendations.push({ name: 'Marketing Automation', description: 'Automate your campaigns' });\n}\nif (topPreference === 'crm' || contact.tags?.includes('crm')) {\n  recommendations.push({ name: 'CRM Integration', description: 'Sync all your contacts' });\n}\nif (recommendations.length === 0) {\n  recommendations.push({ name: 'Getting Started', description: 'See what GreeVo can do for you' });\n}\n\nreturn [{\n  json: {\n    contact_id: contact.id,\n    email: contact.email,\n    first_name: contact.first_name,\n    personalization: {\n      engagement_level: engagementLevel,\n      content_preference: topPreference,\n      tone: tone,\n      cta: cta,\n      recommendations: recommendations,\n      greeting: tone === 'casual' ? `Hey ${contact.first_name || 'there'}!` : \n                tone === 'formal' ? `Dear ${contact.first_name || 'Valued Customer'},` :\n                `Hi ${contact.first_name || 'there'},`,\n      show_social_proof: engagementLevel === 'cold',\n      show_urgency: contact.lead_score >= 60,\n      preferred_content_length: engagementLevel === 'hot' ? 'short' : 'medium'\n    },\n    template_data: {\n      greeting: tone === 'casual' ? `Hey ${contact.first_name || 'there'}!` : `Hi ${contact.first_name || 'there'},`,\n      cta_text: cta.text,\n      cta_url: cta.url,\n      recommendations: recommendations,\n      engagement_level: engagementLevel\n    }\n  }\n}];"
+      },
+      "id": "build-personalization",
+      "name": "Build Personalization",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}"
+      },
+      "id": "response-personalization",
+      "name": "Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [910, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Personalize": {
+      "main": [[{ "node": "Get Contact Profile", "type": "main", "index": 0 }]]
+    },
+    "Get Contact Profile": {
+      "main": [[{ "node": "Build Personalization", "type": "main", "index": 0 }]]
+    },
+    "Build Personalization": {
+      "main": [[{ "node": "Response", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "Marketing" },
+    { "name": "Personalization" },
+    { "name": "Dynamic Content" }
+  ]
+}

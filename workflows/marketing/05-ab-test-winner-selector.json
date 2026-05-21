@@ -1,0 +1,207 @@
+{
+  "name": "Marketing - A/B Test Winner Selector",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "hours", "hoursInterval": 4 }]
+        }
+      },
+      "id": "check-every-4h",
+      "name": "Every 4 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT ec.id, ec.campaign_name, ec.segment_criteria, ec.client_id, ec.created_at, (ec.segment_criteria->>'test_duration_hours')::int as test_duration_hours, ec.segment_criteria->>'test_id' as test_id, ec.segment_criteria->'variants' as variants, ec.segment_criteria->>'winning_metric' as winning_metric FROM email_campaigns ec WHERE ec.campaign_type = 'ab_test' AND ec.status = 'active' AND ec.created_at + ((ec.segment_criteria->>'test_duration_hours')::int || ' hours')::interval < NOW()",
+        "options": {}
+      },
+      "id": "get-completed-tests",
+      "name": "Get Completed Tests",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const tests = $input.all().map(i => i.json);\nif (!tests.length || !tests[0].test_id) return [];\n\nconst results = [];\n\nfor (const test of tests) {\n  const variants = typeof test.variants === 'string' ? JSON.parse(test.variants) : test.variants;\n  if (!variants || !variants.length) continue;\n  \n  results.push({\n    json: {\n      campaign_id: test.id,\n      test_id: test.test_id,\n      campaign_name: test.campaign_name,\n      client_id: test.client_id,\n      winning_metric: test.winning_metric || 'open_rate',\n      variants: variants,\n      variant_ids: variants.map(v => v.variant_id)\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "parse-tests",
+      "name": "Parse Tests",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT la.activity_data->>'variant_id' as variant_id, la.activity_data->>'variant_label' as variant_label, COUNT(*) FILTER (WHERE la.activity_type = 'ab_test_email_sent') as sent, COUNT(*) FILTER (WHERE la.activity_type = 'email_opened') as opened, COUNT(*) FILTER (WHERE la.activity_type = 'email_clicked') as clicked, COUNT(*) FILTER (WHERE la.activity_type = 'converted') as converted FROM lead_activities la WHERE la.activity_data->>'test_id' = '{{ $json.test_id }}' AND la.activity_type IN ('ab_test_email_sent', 'email_opened', 'email_clicked', 'converted') GROUP BY la.activity_data->>'variant_id', la.activity_data->>'variant_label'",
+        "options": {}
+      },
+      "id": "get-variant-stats",
+      "name": "Get Variant Stats",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const stats = $input.all().map(i => i.json);\nconst testConfig = $node['Parse Tests'].json;\n\nif (!stats.length) return [{ json: { ...testConfig, winner: null, reason: 'No stats available' } }];\n\n// Calculate rates\nconst variantResults = stats.map(s => {\n  const sent = parseInt(s.sent) || 1;\n  return {\n    variant_id: s.variant_id,\n    variant_label: s.variant_label,\n    sent: parseInt(s.sent) || 0,\n    opened: parseInt(s.opened) || 0,\n    clicked: parseInt(s.clicked) || 0,\n    converted: parseInt(s.converted) || 0,\n    open_rate: (parseInt(s.opened) || 0) / sent * 100,\n    click_rate: (parseInt(s.clicked) || 0) / sent * 100,\n    conversion_rate: (parseInt(s.converted) || 0) / sent * 100\n  };\n});\n\n// Determine winner based on metric\nconst metric = testConfig.winning_metric;\nconst sorted = [...variantResults].sort((a, b) => b[metric] - a[metric]);\nconst winner = sorted[0];\n\n// Statistical significance check (simplified)\nconst totalSent = variantResults.reduce((sum, v) => sum + v.sent, 0);\nconst isSignificant = totalSent >= 100 && (winner[metric] - sorted[1][metric]) > 2;\n\n// Find winning subject line from original variants\nconst winningVariant = testConfig.variants.find(v => v.variant_id === winner.variant_id);\n\nreturn [{\n  json: {\n    ...testConfig,\n    results: variantResults,\n    winner: {\n      variant_id: winner.variant_id,\n      variant_label: winner.variant_label,\n      subject_line: winningVariant?.subject_line || 'Unknown',\n      metrics: winner\n    },\n    is_significant: isSignificant,\n    summary: `Variant ${winner.variant_label} wins with ${winner[metric].toFixed(1)}% ${metric.replace('_', ' ')}`\n  }\n}];"
+      },
+      "id": "determine-winner",
+      "name": "Determine Winner",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1130, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE email_campaigns SET status = 'completed', stats = stats || '{{ JSON.stringify({winner: $json.winner, results: $json.results, is_significant: $json.is_significant}) }}'::jsonb WHERE id = {{ $json.campaign_id }}",
+        "options": {}
+      },
+      "id": "update-campaign",
+      "name": "Update Campaign",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1350, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#marketing-results",
+        "text": "🏆 *A/B Test Complete*\n\n*Campaign:* {{ $json.campaign_name }}\n*Test ID:* {{ $json.test_id }}\n*Winning Metric:* {{ $json.winning_metric }}\n*Significant:* {{ $json.is_significant ? '✅ Yes' : '⚠️ Not enough data' }}\n\n*Results:*\n{{ $json.results.map(r => `• Variant ${r.variant_label}: Open ${r.open_rate.toFixed(1)}% | Click ${r.click_rate.toFixed(1)}% | Conv ${r.conversion_rate.toFixed(1)}%`).join('\\n') }}\n\n🏆 *Winner: Variant {{ $json.winner.variant_label }}*\nSubject: \"{{ $json.winner.subject_line }}\"\n{{ $json.summary }}\n\n_Winning variant will be sent to remaining audience automatically._",
+        "options": {}
+      },
+      "id": "notify-winner",
+      "name": "Notify Winner",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1570, 200],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.is_significant }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "is-significant",
+      "name": "Is Significant?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1570, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.id, c.email, c.first_name FROM contacts c WHERE c.lead_status NOT IN ('lost') {{ $node['Parse Tests'].json.client_id ? 'AND c.client_id = ' + $node['Parse Tests'].json.client_id : '' }} AND c.id NOT IN ( SELECT la.contact_id FROM lead_activities la WHERE la.activity_data->>'test_id' = '{{ $node['Parse Tests'].json.test_id }}' ) ORDER BY RANDOM()",
+        "options": {}
+      },
+      "id": "get-remaining-audience",
+      "name": "Get Remaining Audience",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1790, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $node['Parse Tests'].json.from_email || 'marketing@company.com' }}",
+        "toEmail": "={{ $json.email }}",
+        "subject": "={{ $node['Determine Winner'].json.winner.subject_line.replace('{{first_name}}', $json.first_name || 'there') }}",
+        "contentType": "html",
+        "content": "",
+        "options": {
+          "templateId": "={{ $node['Determine Winner'].json.winner.template_id || 'd-default' }}"
+        }
+      },
+      "id": "send-winner-to-rest",
+      "name": "Send Winner to Rest",
+      "type": "n8n-nodes-base.sendGrid",
+      "typeVersion": 1,
+      "position": [2010, 400],
+      "credentials": {
+        "sendGridApi": {
+          "id": "sendgrid-cred",
+          "name": "SendGrid API"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Every 4 Hours": {
+      "main": [[{ "node": "Get Completed Tests", "type": "main", "index": 0 }]]
+    },
+    "Get Completed Tests": {
+      "main": [[{ "node": "Parse Tests", "type": "main", "index": 0 }]]
+    },
+    "Parse Tests": {
+      "main": [[{ "node": "Get Variant Stats", "type": "main", "index": 0 }]]
+    },
+    "Get Variant Stats": {
+      "main": [[{ "node": "Determine Winner", "type": "main", "index": 0 }]]
+    },
+    "Determine Winner": {
+      "main": [[{ "node": "Update Campaign", "type": "main", "index": 0 }]]
+    },
+    "Update Campaign": {
+      "main": [[
+        { "node": "Notify Winner", "type": "main", "index": 0 },
+        { "node": "Is Significant?", "type": "main", "index": 0 }
+      ]]
+    },
+    "Is Significant?": {
+      "main": [
+        [{ "node": "Get Remaining Audience", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Get Remaining Audience": {
+      "main": [[{ "node": "Send Winner to Rest", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "Marketing" },
+    { "name": "A/B Testing" },
+    { "name": "Automation" }
+  ]
+}

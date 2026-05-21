@@ -1,0 +1,236 @@
+{
+  "name": "Marketing - Unsubscribe & Preference Center",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "preferences/update",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-preferences",
+      "name": "Webhook - Update Preferences",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 200]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "unsubscribe",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-unsubscribe",
+      "name": "Webhook - Unsubscribe",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 450]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\n\nconst email = body.email;\nif (!email) return [{ json: { error: true, message: 'Email required' } }];\n\n// Valid preference categories\nconst validCategories = ['marketing', 'product_updates', 'newsletter', 'promotions', 'events', 'seo_reports'];\n\nconst preferences = {};\nfor (const cat of validCategories) {\n  if (body.preferences && body.preferences[cat] !== undefined) {\n    preferences[cat] = Boolean(body.preferences[cat]);\n  }\n}\n\nreturn [{\n  json: {\n    email: email,\n    preferences: preferences,\n    frequency: body.frequency || 'weekly', // daily, weekly, monthly, never\n    action: 'update_preferences'\n  }\n}];"
+      },
+      "id": "parse-preferences",
+      "name": "Parse Preferences",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE contacts SET custom_fields = custom_fields || jsonb_build_object('email_preferences', '{{ JSON.stringify($json.preferences) }}'::jsonb, 'email_frequency', '{{ $json.frequency }}', 'preferences_updated_at', '{{ new Date().toISOString() }}') WHERE email = '{{ $json.email }}' RETURNING id, email, first_name",
+        "options": {}
+      },
+      "id": "update-preferences",
+      "name": "Update Preferences",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, message: 'Preferences updated successfully', preferences: $node['Parse Preferences'].json.preferences, frequency: $node['Parse Preferences'].json.frequency }) }}"
+      },
+      "id": "response-preferences-ok",
+      "name": "Response: Preferences Updated",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [910, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\n\nconst email = body.email;\nif (!email) return [{ json: { error: true, message: 'Email required' } }];\n\nreturn [{\n  json: {\n    email: email,\n    reason: body.reason || 'not_specified',\n    feedback: body.feedback || '',\n    unsubscribe_from: body.unsubscribe_from || 'all', // all, marketing, newsletter\n    action: 'unsubscribe'\n  }\n}];"
+      },
+      "id": "parse-unsubscribe",
+      "name": "Parse Unsubscribe",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 450]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.unsubscribe_from }}",
+              "operation": "equal",
+              "value2": "all"
+            }
+          ]
+        }
+      },
+      "id": "unsub-all",
+      "name": "Unsubscribe All?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [690, 450]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE contacts SET custom_fields = custom_fields || '{\"email_preferences\": {\"marketing\": false, \"product_updates\": false, \"newsletter\": false, \"promotions\": false, \"events\": false, \"seo_reports\": false}, \"unsubscribed\": true, \"unsubscribed_at\": \"{{ new Date().toISOString() }}\", \"unsubscribe_reason\": \"{{ $json.reason }}\"}'::jsonb WHERE email = '{{ $json.email }}' RETURNING id, email, first_name, client_id",
+        "options": {}
+      },
+      "id": "unsub-all-db",
+      "name": "Unsubscribe All in DB",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE contacts SET custom_fields = custom_fields || jsonb_build_object('email_preferences', (COALESCE(custom_fields->'email_preferences', '{}'::jsonb) || jsonb_build_object('{{ $json.unsubscribe_from }}', false)), 'partial_unsub_at', '{{ new Date().toISOString() }}') WHERE email = '{{ $json.email }}' RETURNING id, email, first_name, client_id",
+        "options": {}
+      },
+      "id": "unsub-partial-db",
+      "name": "Partial Unsubscribe",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 550],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) VALUES ({{ $json.id }}, 'unsubscribed', '{\"from\": \"{{ $node['Parse Unsubscribe'].json.unsubscribe_from }}\", \"reason\": \"{{ $node['Parse Unsubscribe'].json.reason }}\", \"feedback\": \"{{ $node['Parse Unsubscribe'].json.feedback }}\"}'::jsonb, -10)",
+        "options": {}
+      },
+      "id": "log-unsubscribe",
+      "name": "Log Unsubscribe",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 450],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.sendgrid.com/v3/asm/groups/{{ $env.SENDGRID_UNSUB_GROUP_ID }}/suppressions",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "body",
+              "value": "={{ JSON.stringify({ recipient_emails: [$json.email] }) }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "sync-sendgrid-unsub",
+      "name": "Sync to SendGrid Suppression",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1350, 450],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "sendgrid-header-cred",
+          "name": "SendGrid Header Auth"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, message: 'You have been unsubscribed', unsubscribed_from: $node['Parse Unsubscribe'].json.unsubscribe_from }) }}"
+      },
+      "id": "response-unsub-ok",
+      "name": "Response: Unsubscribed",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1570, 450]
+    }
+  ],
+  "connections": {
+    "Webhook - Update Preferences": {
+      "main": [[{ "node": "Parse Preferences", "type": "main", "index": 0 }]]
+    },
+    "Parse Preferences": {
+      "main": [[{ "node": "Update Preferences", "type": "main", "index": 0 }]]
+    },
+    "Update Preferences": {
+      "main": [[{ "node": "Response: Preferences Updated", "type": "main", "index": 0 }]]
+    },
+    "Webhook - Unsubscribe": {
+      "main": [[{ "node": "Parse Unsubscribe", "type": "main", "index": 0 }]]
+    },
+    "Parse Unsubscribe": {
+      "main": [[{ "node": "Unsubscribe All?", "type": "main", "index": 0 }]]
+    },
+    "Unsubscribe All?": {
+      "main": [
+        [{ "node": "Unsubscribe All in DB", "type": "main", "index": 0 }],
+        [{ "node": "Partial Unsubscribe", "type": "main", "index": 0 }]
+      ]
+    },
+    "Unsubscribe All in DB": {
+      "main": [[{ "node": "Log Unsubscribe", "type": "main", "index": 0 }]]
+    },
+    "Partial Unsubscribe": {
+      "main": [[{ "node": "Log Unsubscribe", "type": "main", "index": 0 }]]
+    },
+    "Log Unsubscribe": {
+      "main": [[{ "node": "Sync to SendGrid Suppression", "type": "main", "index": 0 }]]
+    },
+    "Sync to SendGrid Suppression": {
+      "main": [[{ "node": "Response: Unsubscribed", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    { "name": "Marketing" },
+    { "name": "Compliance" },
+    { "name": "Preferences" }
+  ]
+}
