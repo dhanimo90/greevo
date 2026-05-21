@@ -1,0 +1,86 @@
+{
+  "name": "AI - Smart Contact Segmentation",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 4 * * 0" }] }
+      },
+      "id": "weekly-sunday",
+      "name": "Sunday 4 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.id, c.email, c.company, c.job_title, c.lead_score, c.lead_status, c.source, c.tags, c.custom_fields, c.created_at, (SELECT COUNT(*) FROM lead_activities la WHERE la.contact_id = c.id) as total_activities, (SELECT COUNT(*) FROM lead_activities la WHERE la.contact_id = c.id AND la.activity_type = 'email_opened') as emails_opened, (SELECT COUNT(*) FROM lead_activities la WHERE la.contact_id = c.id AND la.activity_type = 'email_clicked') as emails_clicked, (SELECT COUNT(*) FROM lead_activities la WHERE la.contact_id = c.id AND la.activity_type = 'page_view') as page_views, (SELECT COUNT(*) FROM lead_activities la WHERE la.contact_id = c.id AND la.activity_type IN ('meeting_scheduled', 'demo_completed')) as meetings, (SELECT COALESCE(SUM(d.deal_value), 0) FROM deals d WHERE d.contact_id = c.id AND d.stage = 'closed_won') as lifetime_value FROM contacts c WHERE c.lead_status NOT IN ('lost') AND c.created_at > NOW() - INTERVAL '180 days' ORDER BY c.lead_score DESC LIMIT 500",
+        "options": {}
+      },
+      "id": "get-contacts",
+      "name": "Get Contact Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "functionCode": "const contacts = $input.all().map(i => i.json);\nif (!contacts.length || !contacts[0].id) return [{ json: { no_data: true } }];\n\n// K-means-like clustering (simplified)\nconst segments = {\n  'high_value_engaged': { contacts: [], criteria: 'High LTV + High engagement' },\n  'hot_prospects': { contacts: [], criteria: 'High score + Recent activity + No purchase yet' },\n  'nurture_needed': { contacts: [], criteria: 'Medium score + Low recent engagement' },\n  'at_risk_customers': { contacts: [], criteria: 'Customer + Declining engagement' },\n  'new_cold': { contacts: [], criteria: 'New + Low engagement' },\n  'power_users': { contacts: [], criteria: 'High activity + Multiple interactions' }\n};\n\nfor (const c of contacts) {\n  const score = parseInt(c.lead_score) || 0;\n  const activities = parseInt(c.total_activities) || 0;\n  const opens = parseInt(c.emails_opened) || 0;\n  const clicks = parseInt(c.emails_clicked) || 0;\n  const meetings = parseInt(c.meetings) || 0;\n  const ltv = parseFloat(c.lifetime_value) || 0;\n  const isCustomer = c.lead_status === 'customer';\n  const daysSinceCreated = (Date.now() - new Date(c.created_at).getTime()) / (1000*60*60*24);\n\n  let segment = 'new_cold';\n\n  if (isCustomer && ltv > 0 && activities > 10) {\n    segment = 'high_value_engaged';\n  } else if (isCustomer && activities < 5) {\n    segment = 'at_risk_customers';\n  } else if (activities > 15 && (clicks > 5 || meetings > 0)) {\n    segment = 'power_users';\n  } else if (score >= 60 && !isCustomer && activities > 5) {\n    segment = 'hot_prospects';\n  } else if (score >= 30 && score < 60 && opens < 3) {\n    segment = 'nurture_needed';\n  } else if (daysSinceCreated < 30 && activities < 3) {\n    segment = 'new_cold';\n  }\n\n  segments[segment].contacts.push(c.id);\n}\n\n// Build summary\nconst summary = Object.entries(segments).map(([name, data]) => ({\n  segment: name,\n  count: data.contacts.length,\n  criteria: data.criteria,\n  contact_ids: data.contacts.slice(0, 50)\n}));\n\nreturn [{ json: {\n  total_segmented: contacts.length,\n  segments: summary,\n  generated_at: new Date().toISOString()\n}}];"
+      },
+      "id": "segment-contacts",
+      "name": "Segment Contacts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.segments.map(s => s.contact_ids.length > 0 ? `UPDATE contacts SET tags = array_append(COALESCE(tags, ARRAY[]::text[]), 'segment:${s.segment}') WHERE id IN (${s.contact_ids.join(',')}) AND NOT ('segment:${s.segment}' = ANY(COALESCE(tags, ARRAY[]::text[])))` : 'SELECT 1').join('; ') }}",
+        "options": {}
+      },
+      "id": "tag-contacts",
+      "name": "Tag Contacts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO analytics_snapshots (report_type, period_start, period_end, metrics, source) VALUES ('weekly', CURRENT_DATE, CURRENT_DATE, '{{ JSON.stringify($json) }}'::jsonb, 'smart_segmentation')",
+        "options": {}
+      },
+      "id": "save-segments",
+      "name": "Save Segments",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "channel": "#marketing-intelligence",
+        "text": "🧠 *Smart Segmentation Update*\n\n*Total Contacts Analyzed:* {{ $json.total_segmented }}\n\n*Segments:*\n{{ $json.segments.map(s => `• *${s.segment.replace(/_/g, ' ')}*: ${s.count} contacts\\n  _${s.criteria}_`).join('\\n') }}\n\n_Contacts auto-tagged. Use segments for targeted campaigns._",
+        "options": {}
+      },
+      "id": "report-segments",
+      "name": "Report Segments",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1350, 300],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack Bot" } }
+    }
+  ],
+  "connections": {
+    "Sunday 4 AM": { "main": [[{ "node": "Get Contact Data", "type": "main", "index": 0 }]] },
+    "Get Contact Data": { "main": [[{ "node": "Segment Contacts", "type": "main", "index": 0 }]] },
+    "Segment Contacts": { "main": [[{ "node": "Tag Contacts", "type": "main", "index": 0 }]] },
+    "Tag Contacts": { "main": [[{ "node": "Save Segments", "type": "main", "index": 0 }]] },
+    "Save Segments": { "main": [[{ "node": "Report Segments", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "AI" }, { "name": "Segmentation" }, { "name": "Marketing" }]
+}

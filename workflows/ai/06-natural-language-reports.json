@@ -1,0 +1,100 @@
+{
+  "name": "AI - Natural Language Report Queries",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ai/ask",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-ask",
+      "name": "Webhook - Ask Question",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\nconst question = body.question || body.q || '';\n\nif (!question) return [{ json: { error: true, message: 'Question required' } }];\n\nconst prompt = `You are a data analyst for a CRM/Marketing platform. Convert this natural language question into a PostgreSQL query.\n\nAvailable tables:\n- contacts (id, email, first_name, last_name, company, lead_score, lead_status, source, created_at)\n- deals (id, contact_id, deal_name, deal_value, stage, probability, assigned_to, created_at)\n- lead_activities (id, contact_id, activity_type, activity_data, score_impact, created_at)\n- tracked_keywords (id, keyword, target_url, is_active)\n- keyword_rankings (id, keyword_id, position, previous_position, search_volume, checked_at)\n- backlinks (id, source_url, target_url, domain_rating, is_active, first_seen)\n\nQuestion: \"${question}\"\n\nRespond with ONLY a JSON object: {\"sql\": \"YOUR_SELECT_QUERY\", \"explanation\": \"brief explanation\"}\nRules: Only SELECT queries. No INSERT/UPDATE/DELETE. Limit results to 20.`;\n\nreturn [{ json: { question, prompt, client_id: body.client_id } }];"
+      },
+      "id": "build-query-prompt",
+      "name": "Build Query Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [{ "name": "body", "value": "={{ JSON.stringify({ model: $env.OPENAI_MODEL || 'gpt-4o-mini', messages: [{ role: 'system', content: 'You are a SQL expert. Respond only with valid JSON containing a safe SELECT query.' }, { role: 'user', content: $json.prompt }], temperature: 0.3, max_tokens: 500 }) }}" }]
+        },
+        "options": { "timeout": 20000 }
+      },
+      "id": "ai-generate-sql",
+      "name": "AI Generate SQL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [690, 300],
+      "credentials": { "httpHeaderAuth": { "id": "openai-cred", "name": "OpenAI API" } },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "functionCode": "const response = $input.first().json;\nconst content = response.choices?.[0]?.message?.content || '';\n\nlet parsed = {};\ntry {\n  const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n  parsed = JSON.parse(jsonMatch ? jsonMatch[0] : '{}');\n} catch(e) {\n  return [{ json: { error: true, message: 'Could not parse AI response' } }];\n}\n\nconst sql = parsed.sql || '';\n\n// Safety check: only allow SELECT\nif (!sql.trim().toUpperCase().startsWith('SELECT') || sql.includes('DROP') || sql.includes('DELETE') || sql.includes('INSERT') || sql.includes('UPDATE') || sql.includes('ALTER')) {\n  return [{ json: { error: true, message: 'Unsafe query detected' } }];\n}\n\nreturn [{ json: { sql, explanation: parsed.explanation || '', question: $node['Build Query Prompt'].json.question } }];"
+      },
+      "id": "validate-sql",
+      "name": "Validate SQL",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.sql }}",
+        "options": {}
+      },
+      "id": "execute-query",
+      "name": "Execute Query",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "functionCode": "const results = $input.all().map(i => i.json);\nconst queryInfo = $node['Validate SQL'].json;\n\nreturn [{ json: {\n  success: true,\n  question: queryInfo.question,\n  explanation: queryInfo.explanation,\n  sql: queryInfo.sql,\n  results: results,\n  result_count: results.length\n}}];"
+      },
+      "id": "format-results",
+      "name": "Format Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1350, 300]
+    },
+    {
+      "parameters": { "respondWith": "json", "responseBody": "={{ JSON.stringify($json) }}" },
+      "id": "response-ok",
+      "name": "Response OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1570, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Ask Question": { "main": [[{ "node": "Build Query Prompt", "type": "main", "index": 0 }]] },
+    "Build Query Prompt": { "main": [[{ "node": "AI Generate SQL", "type": "main", "index": 0 }]] },
+    "AI Generate SQL": { "main": [[{ "node": "Validate SQL", "type": "main", "index": 0 }]] },
+    "Validate SQL": { "main": [[{ "node": "Execute Query", "type": "main", "index": 0 }]] },
+    "Execute Query": { "main": [[{ "node": "Format Results", "type": "main", "index": 0 }]] },
+    "Format Results": { "main": [[{ "node": "Response OK", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "AI" }, { "name": "NLP" }, { "name": "Reports" }]
+}

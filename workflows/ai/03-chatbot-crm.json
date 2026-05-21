@@ -1,0 +1,128 @@
+{
+  "name": "AI - Chatbot to CRM Integration",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "chatbot/message",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-chat",
+      "name": "Webhook - Chat Message",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\n\nreturn [{ json: {\n  session_id: body.session_id || 'sess_' + Date.now(),\n  visitor_id: body.visitor_id,\n  email: body.email || null,\n  name: body.name || null,\n  message: body.message || '',\n  page_url: body.page_url || '',\n  client_id: body.client_id,\n  metadata: body.metadata || {}\n}}];"
+      },
+      "id": "parse-chat",
+      "name": "Parse Chat",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [{ "name": "body", "value": "={{ JSON.stringify({ model: $env.OPENAI_MODEL || 'gpt-4o-mini', messages: [{ role: 'system', content: 'You are a helpful sales assistant for a marketing automation company. Be concise, friendly, and helpful. If the visitor asks about pricing, features, or wants a demo, collect their email and name. Respond in the same language the user writes in. Keep responses under 100 words. If you detect the user wants to talk to a human, respond with [HANDOFF] at the start.' }, { role: 'user', content: $json.message }], temperature: 0.7, max_tokens: 200 }) }}" }]
+        },
+        "options": { "timeout": 15000 }
+      },
+      "id": "ai-respond",
+      "name": "AI Generate Response",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [690, 300],
+      "credentials": { "httpHeaderAuth": { "id": "openai-cred", "name": "OpenAI API" } },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "functionCode": "const response = $input.first().json;\nconst chatData = $node['Parse Chat'].json;\nconst aiReply = response.choices?.[0]?.message?.content || 'Maaf, saya tidak bisa memproses pesan Anda saat ini. Tim kami akan segera membantu.';\n\nconst needsHandoff = aiReply.startsWith('[HANDOFF]');\nconst cleanReply = aiReply.replace('[HANDOFF]', '').trim();\n\n// Detect if visitor provided email in message\nconst emailMatch = chatData.message.match(/[\\w.-]+@[\\w.-]+\\.[a-zA-Z]{2,}/);\nconst detectedEmail = emailMatch ? emailMatch[0] : chatData.email;\n\n// Detect intent\nconst msg = chatData.message.toLowerCase();\nlet intent = 'general';\nif (msg.includes('harga') || msg.includes('price') || msg.includes('biaya')) intent = 'pricing';\nelse if (msg.includes('demo') || msg.includes('coba') || msg.includes('trial')) intent = 'demo';\nelse if (msg.includes('fitur') || msg.includes('feature')) intent = 'features';\nelse if (msg.includes('bantuan') || msg.includes('help') || msg.includes('masalah')) intent = 'support';\n\nreturn [{ json: {\n  ...chatData,\n  ai_reply: cleanReply,\n  needs_handoff: needsHandoff,\n  detected_email: detectedEmail,\n  intent: intent,\n  should_create_lead: !!detectedEmail && (intent === 'pricing' || intent === 'demo')\n}}];"
+      },
+      "id": "process-response",
+      "name": "Process Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{ "value1": "={{ $json.should_create_lead }}", "value2": true }]
+        }
+      },
+      "id": "should-create-lead",
+      "name": "Create Lead?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1130, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO contacts (email, first_name, source, lead_status, custom_fields, client_id) VALUES ('{{ $json.detected_email }}', '{{ $json.name || '' }}', 'chatbot', 'new', '{\"chatbot_intent\": \"{{ $json.intent }}\", \"page_url\": \"{{ $json.page_url }}\", \"first_message\": \"{{ ($json.message || '').substring(0, 200).replace(/'/g, \"''\") }}\"}'::jsonb, {{ $json.client_id || 'NULL' }}) ON CONFLICT (email) DO UPDATE SET custom_fields = contacts.custom_fields || '{\"last_chat_intent\": \"{{ $json.intent }}\"}'::jsonb, updated_at = NOW() RETURNING id",
+        "options": {}
+      },
+      "id": "create-lead",
+      "name": "Create/Update Lead",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1350, 200],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{ "value1": "={{ $json.needs_handoff }}", "value2": true }]
+        }
+      },
+      "id": "needs-handoff",
+      "name": "Needs Handoff?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1130, 500]
+    },
+    {
+      "parameters": {
+        "channel": "#sales-chat",
+        "text": "💬 *Chat Handoff Requested*\n\n*Visitor:* {{ $json.name || $json.detected_email || $json.visitor_id }}\n*Intent:* {{ $json.intent }}\n*Page:* {{ $json.page_url }}\n*Message:* {{ $json.message }}\n\nPlease take over this conversation.",
+        "options": {}
+      },
+      "id": "notify-handoff",
+      "name": "Notify Handoff",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1350, 500],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack Bot" } }
+    },
+    {
+      "parameters": { "respondWith": "json", "responseBody": "={{ JSON.stringify({ reply: $json.ai_reply, intent: $json.intent, needs_handoff: $json.needs_handoff, session_id: $json.session_id }) }}" },
+      "id": "response-chat",
+      "name": "Response Chat",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1570, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Chat Message": { "main": [[{ "node": "Parse Chat", "type": "main", "index": 0 }]] },
+    "Parse Chat": { "main": [[{ "node": "AI Generate Response", "type": "main", "index": 0 }]] },
+    "AI Generate Response": { "main": [[{ "node": "Process Response", "type": "main", "index": 0 }]] },
+    "Process Response": { "main": [[{ "node": "Create Lead?", "type": "main", "index": 0 }, { "node": "Needs Handoff?", "type": "main", "index": 0 }]] },
+    "Create Lead?": { "main": [[{ "node": "Create/Update Lead", "type": "main", "index": 0 }], []] },
+    "Create/Update Lead": { "main": [[{ "node": "Response Chat", "type": "main", "index": 0 }]] },
+    "Needs Handoff?": { "main": [[{ "node": "Notify Handoff", "type": "main", "index": 0 }], [{ "node": "Response Chat", "type": "main", "index": 0 }]] },
+    "Notify Handoff": { "main": [[{ "node": "Response Chat", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "AI" }, { "name": "Chatbot" }, { "name": "CRM" }]
+}

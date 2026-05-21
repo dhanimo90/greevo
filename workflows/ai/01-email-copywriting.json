@@ -1,0 +1,88 @@
+{
+  "name": "AI - Email Copywriting Generator",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ai/generate-email",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-generate",
+      "name": "Webhook - Generate Email",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\n\nconst prompt = `You are an expert email marketing copywriter. Generate email copy based on these parameters:\n\nPurpose: ${body.purpose || 'promotional'}\nTone: ${body.tone || 'professional'}\nAudience: ${body.audience || 'B2B decision makers'}\nProduct/Service: ${body.product || 'marketing automation platform'}\nKey Message: ${body.key_message || ''}\nCTA: ${body.cta || 'Schedule a demo'}\nLanguage: ${body.language || 'Indonesian'}\n\nGenerate:\n1. 3 subject line options (max 60 chars each)\n2. Preview text (max 90 chars)\n3. Email body (150-250 words)\n4. CTA button text\n\nFormat as JSON with keys: subject_lines (array), preview_text, body_html, cta_text`;\n\nreturn [{ json: { prompt, params: body, client_id: body.client_id } }];"
+      },
+      "id": "build-prompt",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [{ "name": "body", "value": "={{ JSON.stringify({ model: $env.OPENAI_MODEL || 'gpt-4o-mini', messages: [{ role: 'system', content: 'You are an expert email copywriter. Always respond in valid JSON format.' }, { role: 'user', content: $json.prompt }], temperature: 0.8, max_tokens: 1000 }) }}" }]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "call-openai",
+      "name": "Call OpenAI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [690, 300],
+      "credentials": { "httpHeaderAuth": { "id": "openai-cred", "name": "OpenAI API" } },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "functionCode": "const response = $input.first().json;\nconst content = response.choices?.[0]?.message?.content || '';\n\nlet generated = {};\ntry {\n  // Try to parse JSON from response\n  const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n  generated = JSON.parse(jsonMatch ? jsonMatch[0] : content);\n} catch(e) {\n  generated = {\n    subject_lines: ['Generated subject line'],\n    preview_text: 'Preview text',\n    body_html: content,\n    cta_text: 'Learn More'\n  };\n}\n\nreturn [{ json: {\n  success: true,\n  generated: generated,\n  usage: {\n    prompt_tokens: response.usage?.prompt_tokens || 0,\n    completion_tokens: response.usage?.completion_tokens || 0,\n    total_tokens: response.usage?.total_tokens || 0\n  },\n  model: response.model || 'unknown'\n}}];"
+      },
+      "id": "parse-ai-response",
+      "name": "Parse AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT log_audit({{ $node['Build Prompt'].json.client_id || 'NULL' }}, 'ai-email-copywriting', 'ai_content_generated', 'ai', NULL, '{{ JSON.stringify({purpose: $node['Build Prompt'].json.params.purpose, tokens: $json.usage.total_tokens, model: $json.model}) }}'::jsonb, 'success')",
+        "options": {}
+      },
+      "id": "log-usage",
+      "name": "Log AI Usage",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": { "respondWith": "json", "responseBody": "={{ JSON.stringify($json) }}" },
+      "id": "response-ok",
+      "name": "Response OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1350, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Generate Email": { "main": [[{ "node": "Build Prompt", "type": "main", "index": 0 }]] },
+    "Build Prompt": { "main": [[{ "node": "Call OpenAI", "type": "main", "index": 0 }]] },
+    "Call OpenAI": { "main": [[{ "node": "Parse AI Response", "type": "main", "index": 0 }]] },
+    "Parse AI Response": { "main": [[{ "node": "Log AI Usage", "type": "main", "index": 0 }]] },
+    "Log AI Usage": { "main": [[{ "node": "Response OK", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "AI" }, { "name": "Email" }, { "name": "Copywriting" }]
+}

@@ -1,0 +1,72 @@
+{
+  "name": "AI - Smart Send Time Optimization",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 0 * * 0" }] }
+      },
+      "id": "weekly-sunday",
+      "name": "Sunday Midnight",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.id as contact_id, c.email, EXTRACT(HOUR FROM la.created_at) as hour_opened, EXTRACT(DOW FROM la.created_at) as day_opened, COUNT(*) as open_count FROM contacts c JOIN lead_activities la ON la.contact_id = c.id WHERE la.activity_type = 'email_opened' AND la.created_at > NOW() - INTERVAL '90 days' GROUP BY c.id, c.email, EXTRACT(HOUR FROM la.created_at), EXTRACT(DOW FROM la.created_at) HAVING COUNT(*) >= 2 ORDER BY c.id",
+        "options": {}
+      },
+      "id": "get-open-patterns",
+      "name": "Get Open Patterns",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "functionCode": "const patterns = $input.all().map(i => i.json);\nif (!patterns.length || !patterns[0].contact_id) return [{ json: { no_data: true } }];\n\n// Group by contact\nconst contactPatterns = {};\nfor (const p of patterns) {\n  if (!contactPatterns[p.contact_id]) {\n    contactPatterns[p.contact_id] = { email: p.email, hours: {}, days: {} };\n  }\n  const hour = parseInt(p.hour_opened);\n  const day = parseInt(p.day_opened);\n  const count = parseInt(p.open_count);\n  \n  contactPatterns[p.contact_id].hours[hour] = (contactPatterns[p.contact_id].hours[hour] || 0) + count;\n  contactPatterns[p.contact_id].days[day] = (contactPatterns[p.contact_id].days[day] || 0) + count;\n}\n\n// Calculate optimal send time per contact\nconst recommendations = [];\nfor (const [contactId, data] of Object.entries(contactPatterns)) {\n  // Find best hour\n  const bestHour = Object.entries(data.hours)\n    .sort((a, b) => b[1] - a[1])[0];\n  \n  // Find best day\n  const bestDay = Object.entries(data.days)\n    .sort((a, b) => b[1] - a[1])[0];\n\n  const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];\n\n  recommendations.push({\n    contact_id: parseInt(contactId),\n    email: data.email,\n    best_hour: parseInt(bestHour?.[0] || 9),\n    best_day: parseInt(bestDay?.[0] || 2),\n    best_day_name: dayNames[parseInt(bestDay?.[0] || 2)],\n    confidence: Math.min(100, Object.values(data.hours).reduce((s, v) => s + v, 0) * 5)\n  });\n}\n\nreturn [{ json: {\n  total_contacts_analyzed: recommendations.length,\n  recommendations: recommendations,\n  global_best_hour: getMostCommon(recommendations.map(r => r.best_hour)),\n  global_best_day: getMostCommon(recommendations.map(r => r.best_day_name)),\n  generated_at: new Date().toISOString()\n}}];\n\nfunction getMostCommon(arr) {\n  const counts = {};\n  arr.forEach(v => counts[v] = (counts[v] || 0) + 1);\n  return Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] || 'Tuesday';\n}"
+      },
+      "id": "calculate-optimal",
+      "name": "Calculate Optimal Times",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.recommendations.slice(0, 100).map(r => `UPDATE contacts SET custom_fields = COALESCE(custom_fields, '{}'::jsonb) || '{\"optimal_send_hour\": ${r.best_hour}, \"optimal_send_day\": ${r.best_day}, \"send_time_confidence\": ${r.confidence}}'::jsonb WHERE id = ${r.contact_id}`).join('; ') || 'SELECT 1' }}",
+        "options": {}
+      },
+      "id": "update-contacts",
+      "name": "Update Contact Preferences",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO analytics_snapshots (report_type, period_start, period_end, metrics, source) VALUES ('weekly', CURRENT_DATE, CURRENT_DATE, '{{ JSON.stringify({total: $json.total_contacts_analyzed, global_best_hour: $json.global_best_hour, global_best_day: $json.global_best_day}) }}'::jsonb, 'smart_send_time')",
+        "options": {}
+      },
+      "id": "save-analysis",
+      "name": "Save Analysis",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    }
+  ],
+  "connections": {
+    "Sunday Midnight": { "main": [[{ "node": "Get Open Patterns", "type": "main", "index": 0 }]] },
+    "Get Open Patterns": { "main": [[{ "node": "Calculate Optimal Times", "type": "main", "index": 0 }]] },
+    "Calculate Optimal Times": { "main": [[{ "node": "Update Contact Preferences", "type": "main", "index": 0 }]] },
+    "Update Contact Preferences": { "main": [[{ "node": "Save Analysis", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "AI" }, { "name": "Send Time" }, { "name": "Optimization" }]
+}

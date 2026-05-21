@@ -1,0 +1,90 @@
+{
+  "name": "AI - SEO Recommendations Engine",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 8 * * 1" }] }
+      },
+      "id": "weekly-monday",
+      "name": "Monday 8 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT json_build_object('rankings', (SELECT json_agg(row_to_json(r)) FROM (SELECT tk.keyword, kr.position, kr.previous_position, kr.search_volume FROM tracked_keywords tk JOIN keyword_rankings kr ON kr.keyword_id = tk.id WHERE kr.checked_at > NOW() - INTERVAL '7 days' AND tk.is_active = true ORDER BY kr.search_volume DESC LIMIT 20) r), 'backlinks', (SELECT json_build_object('total', COUNT(*), 'new_7d', COUNT(*) FILTER (WHERE first_seen > NOW() - INTERVAL '7 days'), 'avg_dr', ROUND(AVG(domain_rating))) FROM backlinks WHERE is_active = true), 'health_issues', (SELECT json_agg(row_to_json(h)) FROM (SELECT url, issues FROM site_health_checks WHERE checked_at > NOW() - INTERVAL '7 days' AND jsonb_array_length(issues) > 0 LIMIT 5) h), 'top_pages_gsc', (SELECT metrics->'top_queries' FROM analytics_snapshots WHERE source = 'search_console' ORDER BY created_at DESC LIMIT 1)) as seo_data",
+        "options": {}
+      },
+      "id": "get-seo-data",
+      "name": "Get SEO Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "functionCode": "const result = $input.first().json;\nlet seoData;\ntry { seoData = typeof result.seo_data === 'string' ? JSON.parse(result.seo_data) : result.seo_data; } catch(e) { seoData = {}; }\n\nconst prompt = `You are an expert SEO consultant. Analyze this SEO data and provide actionable recommendations.\n\nCurrent SEO Data:\n- Rankings: ${JSON.stringify((seoData.rankings || []).slice(0, 10))}\n- Backlinks: ${JSON.stringify(seoData.backlinks || {})}\n- Health Issues: ${JSON.stringify((seoData.health_issues || []).slice(0, 3))}\n- Top GSC Queries: ${JSON.stringify((seoData.top_pages_gsc || []).slice(0, 5))}\n\nProvide:\n1. Top 5 priority actions this week (specific, actionable)\n2. Quick wins (things that can be done in <1 hour)\n3. Content recommendations (topics to write about)\n4. Technical fixes needed\n\nFormat as JSON with keys: priority_actions (array of {action, impact, effort}), quick_wins (array), content_ideas (array of {topic, keyword, reason}), technical_fixes (array)`;\n\nreturn [{ json: { prompt, seo_data: seoData } }];"
+      },
+      "id": "build-seo-prompt",
+      "name": "Build SEO Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://api.openai.com/v1/chat/completions",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [{ "name": "body", "value": "={{ JSON.stringify({ model: $env.OPENAI_MODEL || 'gpt-4o-mini', messages: [{ role: 'system', content: 'You are an SEO expert. Respond only in valid JSON.' }, { role: 'user', content: $json.prompt }], temperature: 0.6, max_tokens: 1500 }) }}" }]
+        },
+        "options": { "timeout": 45000 }
+      },
+      "id": "call-ai-seo",
+      "name": "Call AI for SEO",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [910, 300],
+      "credentials": { "httpHeaderAuth": { "id": "openai-cred", "name": "OpenAI API" } },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "functionCode": "const response = $input.first().json;\nconst content = response.choices?.[0]?.message?.content || '';\n\nlet recommendations = {};\ntry {\n  const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n  recommendations = JSON.parse(jsonMatch ? jsonMatch[0] : '{}');\n} catch(e) {\n  recommendations = { priority_actions: [{ action: 'Review SEO data manually', impact: 'high', effort: 'medium' }], quick_wins: ['Check for broken links'], content_ideas: [], technical_fixes: [] };\n}\n\nreturn [{ json: { recommendations, generated_at: new Date().toISOString() } }];"
+      },
+      "id": "parse-seo-recs",
+      "name": "Parse Recommendations",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1130, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#seo-strategy",
+        "text": "🤖 *AI SEO Recommendations - This Week*\n\n🎯 *Priority Actions:*\n{{ ($json.recommendations.priority_actions || []).map((a, i) => `${i+1}. ${a.action}\\n   Impact: ${a.impact} | Effort: ${a.effort}`).join('\\n') || 'No recommendations' }}\n\n⚡ *Quick Wins (<1 hour):*\n{{ ($json.recommendations.quick_wins || []).map((q, i) => `${i+1}. ${q}`).join('\\n') || 'None' }}\n\n📝 *Content Ideas:*\n{{ ($json.recommendations.content_ideas || []).map((c, i) => `${i+1}. \"${c.topic}\" — Keyword: ${c.keyword || 'N/A'}\\n   ${c.reason || ''}`).join('\\n') || 'None' }}\n\n🔧 *Technical Fixes:*\n{{ ($json.recommendations.technical_fixes || []).map((t, i) => `${i+1}. ${t}`).join('\\n') || 'None' }}\n\n_Generated by AI based on last 7 days of SEO data_",
+        "options": {}
+      },
+      "id": "send-recs",
+      "name": "Send Recommendations",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1350, 300],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack Bot" } }
+    }
+  ],
+  "connections": {
+    "Monday 8 AM": { "main": [[{ "node": "Get SEO Data", "type": "main", "index": 0 }]] },
+    "Get SEO Data": { "main": [[{ "node": "Build SEO Prompt", "type": "main", "index": 0 }]] },
+    "Build SEO Prompt": { "main": [[{ "node": "Call AI for SEO", "type": "main", "index": 0 }]] },
+    "Call AI for SEO": { "main": [[{ "node": "Parse Recommendations", "type": "main", "index": 0 }]] },
+    "Parse Recommendations": { "main": [[{ "node": "Send Recommendations", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "AI" }, { "name": "SEO" }, { "name": "Recommendations" }]
+}
