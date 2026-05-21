@@ -1,0 +1,63 @@
+{
+  "name": "Integration - Microsoft Teams Notifications",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "notify/teams",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-teams",
+      "name": "Webhook - Send to Teams",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\n\nconst category = body.category || 'general'; // sales, marketing, seo, system\nconst priority = body.priority || 'normal'; // low, normal, high, critical\n\n// Map category to Teams channel webhook\nconst channelWebhooks = {\n  sales: $env.TEAMS_WEBHOOK_SALES || $env.TEAMS_WEBHOOK_URL,\n  marketing: $env.TEAMS_WEBHOOK_MARKETING || $env.TEAMS_WEBHOOK_URL,\n  seo: $env.TEAMS_WEBHOOK_SEO || $env.TEAMS_WEBHOOK_URL,\n  system: $env.TEAMS_WEBHOOK_SYSTEM || $env.TEAMS_WEBHOOK_URL,\n  general: $env.TEAMS_WEBHOOK_URL\n};\n\nconst themeColor = {\n  low: '808080',\n  normal: '0076D7',\n  high: 'FFA500',\n  critical: 'FF0000'\n};\n\n// Build Adaptive Card\nconst card = {\n  '@type': 'MessageCard',\n  '@context': 'http://schema.org/extensions',\n  themeColor: themeColor[priority] || '0076D7',\n  summary: body.title || 'GreeVo Notification',\n  sections: [{\n    activityTitle: body.title || 'Notification',\n    activitySubtitle: body.subtitle || new Date().toLocaleString('id-ID'),\n    activityImage: 'https://via.placeholder.com/48/0076D7/FFFFFF?text=G',\n    facts: (body.facts || []).map(f => ({ name: f.label, value: f.value })),\n    markdown: true,\n    text: body.message || ''\n  }]\n};\n\nif (body.actions?.length) {\n  card.potentialAction = body.actions.map(a => ({\n    '@type': 'OpenUri',\n    name: a.label,\n    targets: [{ os: 'default', uri: a.url }]\n  }));\n}\n\nreturn [{\n  json: {\n    webhook_url: channelWebhooks[category],\n    card: card,\n    category: category,\n    priority: priority\n  }\n}];"
+      },
+      "id": "build-card",
+      "name": "Build Teams Card",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.webhook_url }}",
+        "method": "POST",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [{ "name": "body", "value": "={{ JSON.stringify($json.card) }}" }]
+        },
+        "options": { "timeout": 10000 }
+      },
+      "id": "send-teams",
+      "name": "Send to Teams",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [690, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, category: $json.category }) }}"
+      },
+      "id": "response-ok",
+      "name": "Response OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [910, 300]
+    }
+  ],
+  "connections": {
+    "Webhook - Send to Teams": { "main": [[{ "node": "Build Teams Card", "type": "main", "index": 0 }]] },
+    "Build Teams Card": { "main": [[{ "node": "Send to Teams", "type": "main", "index": 0 }]] },
+    "Send to Teams": { "main": [[{ "node": "Response OK", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Integration" }, { "name": "Microsoft Teams" }, { "name": "Notifications" }]
+}

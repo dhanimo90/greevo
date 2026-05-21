@@ -1,0 +1,159 @@
+{
+  "name": "Integration - Shopify/WooCommerce E-commerce",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ecommerce/order",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-order",
+      "name": "Webhook - New Order",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 200]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ecommerce/cart-abandoned",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-cart",
+      "name": "Webhook - Cart Abandoned",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 500]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\n\n// Support Shopify and WooCommerce webhook formats\nconst order = {\n  order_id: body.id || body.order_id || body.number,\n  email: body.email || body.customer?.email || body.billing?.email,\n  first_name: body.customer?.first_name || body.billing?.first_name || '',\n  last_name: body.customer?.last_name || body.billing?.last_name || '',\n  phone: body.customer?.phone || body.billing?.phone || '',\n  total: parseFloat(body.total_price || body.total || 0),\n  currency: body.currency || 'IDR',\n  items: (body.line_items || []).map(item => ({\n    name: item.name || item.title,\n    quantity: item.quantity,\n    price: parseFloat(item.price)\n  })),\n  source: body.source_name || 'shopify',\n  client_id: body.client_id\n};\n\nif (!order.email) return [{ json: { error: true, message: 'No email in order' } }];\n\nreturn [{ json: order }];"
+      },
+      "id": "parse-order",
+      "name": "Parse Order",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO contacts (email, first_name, last_name, phone, source, lead_status) VALUES ('{{ $json.email }}', '{{ $json.first_name }}', '{{ $json.last_name }}', '{{ $json.phone }}', '{{ $json.source }}', 'customer') ON CONFLICT (email) DO UPDATE SET lead_status = 'customer', updated_at = NOW() RETURNING id; INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) SELECT id, 'purchase', '{{ JSON.stringify({order_id: $json.order_id, total: $json.total, items: $json.items.length, currency: $json.currency}) }}'::jsonb, 25 FROM contacts WHERE email = '{{ $json.email }}'; UPDATE contacts SET lead_score = LEAST(100, lead_score + 25) WHERE email = '{{ $json.email }}';",
+        "options": {}
+      },
+      "id": "process-order",
+      "name": "Process Order",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 200],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "channel": "#sales-wins",
+        "text": "🛒 *New Order!*\n\n*Order:* #{{ $json.order_id }}\n*Customer:* {{ $json.first_name }} {{ $json.last_name }} ({{ $json.email }})\n*Total:* {{ $json.currency }} {{ Number($json.total).toLocaleString('id-ID') }}\n*Items:* {{ $json.items.map(i => `${i.name} x${i.quantity}`).join(', ') }}\n*Source:* {{ $json.source }}",
+        "options": {}
+      },
+      "id": "notify-order",
+      "name": "Notify Order",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [910, 200],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack Bot" } }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, order_id: $json.order_id }) }}"
+      },
+      "id": "response-order",
+      "name": "Response Order OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1130, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\n\nreturn [{ json: {\n  email: body.email || body.customer_email,\n  first_name: body.first_name || body.customer_name?.split(' ')[0] || '',\n  cart_total: parseFloat(body.total || body.cart_total || 0),\n  items: body.items || body.line_items || [],\n  abandoned_at: body.abandoned_at || new Date().toISOString(),\n  cart_url: body.cart_url || body.recovery_url || '',\n  client_id: body.client_id\n}}];"
+      },
+      "id": "parse-cart",
+      "name": "Parse Abandoned Cart",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 500]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) SELECT c.id, 'cart_abandoned', '{{ JSON.stringify({total: $json.cart_total, items: $json.items.length, cart_url: $json.cart_url}) }}'::jsonb, 8 FROM contacts c WHERE c.email = '{{ $json.email }}' LIMIT 1;",
+        "options": {}
+      },
+      "id": "log-cart",
+      "name": "Log Cart Abandonment",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 500],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "amount": 1,
+        "unit": "hours"
+      },
+      "id": "wait-1h",
+      "name": "Wait 1 Hour",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [910, 500]
+    },
+    {
+      "parameters": {
+        "fromEmail": "shop@{{ $env.COMPANY_DOMAIN }}",
+        "toEmail": "={{ $json.email }}",
+        "subject": "{{ $json.first_name || 'Hi' }}, you left something behind! 🛒",
+        "contentType": "html",
+        "content": "",
+        "options": {
+          "templateId": "d-cart-abandoned",
+          "dynamicTemplateData": {
+            "first_name": "={{ $json.first_name }}",
+            "cart_total": "={{ $json.cart_total }}",
+            "cart_url": "={{ $json.cart_url }}",
+            "items": "={{ $json.items }}"
+          }
+        }
+      },
+      "id": "send-cart-email",
+      "name": "Send Cart Recovery Email",
+      "type": "n8n-nodes-base.sendGrid",
+      "typeVersion": 1,
+      "position": [1130, 500],
+      "credentials": { "sendGridApi": { "id": "sendgrid-cred", "name": "SendGrid API" } }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, recovery_scheduled: true }) }}"
+      },
+      "id": "response-cart",
+      "name": "Response Cart OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [690, 650]
+    }
+  ],
+  "connections": {
+    "Webhook - New Order": { "main": [[{ "node": "Parse Order", "type": "main", "index": 0 }]] },
+    "Parse Order": { "main": [[{ "node": "Process Order", "type": "main", "index": 0 }]] },
+    "Process Order": { "main": [[{ "node": "Notify Order", "type": "main", "index": 0 }]] },
+    "Notify Order": { "main": [[{ "node": "Response Order OK", "type": "main", "index": 0 }]] },
+    "Webhook - Cart Abandoned": { "main": [[{ "node": "Parse Abandoned Cart", "type": "main", "index": 0 }]] },
+    "Parse Abandoned Cart": { "main": [[{ "node": "Log Cart Abandonment", "type": "main", "index": 0 }, { "node": "Response Cart OK", "type": "main", "index": 0 }]] },
+    "Log Cart Abandonment": { "main": [[{ "node": "Wait 1 Hour", "type": "main", "index": 0 }]] },
+    "Wait 1 Hour": { "main": [[{ "node": "Send Cart Recovery Email", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Integration" }, { "name": "E-commerce" }, { "name": "Shopify" }]
+}

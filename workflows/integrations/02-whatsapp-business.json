@@ -1,0 +1,157 @@
+{
+  "name": "Integration - WhatsApp Business Inbound",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "whatsapp/webhook",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "wa-webhook",
+      "name": "WhatsApp Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "whatsapp/webhook",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "wa-verify",
+      "name": "WhatsApp Verify",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 500],
+      "notes": "Meta webhook verification endpoint"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Handle Meta verification challenge\nconst query = $input.first().json.query || {};\nif (query['hub.verify_token'] === $env.WHATSAPP_VERIFY_TOKEN) {\n  return [{ json: { response: query['hub.challenge'] } }];\n}\nreturn [{ json: { response: 'Forbidden' } }];"
+      },
+      "id": "handle-verify",
+      "name": "Handle Verification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 500]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\n\n// Parse WhatsApp Cloud API webhook\nconst entry = body.entry?.[0];\nconst changes = entry?.changes?.[0];\nconst value = changes?.value;\n\nif (!value?.messages?.length) return [{ json: { skip: true } }];\n\nconst message = value.messages[0];\nconst contact = value.contacts?.[0];\n\nreturn [{\n  json: {\n    message_id: message.id,\n    from: message.from, // phone number\n    contact_name: contact?.profile?.name || '',\n    timestamp: message.timestamp,\n    type: message.type, // text, image, document, etc.\n    text: message.text?.body || '',\n    media_id: message.image?.id || message.document?.id || null,\n    is_reply: !!message.context,\n    reply_to: message.context?.id || null\n  }\n}];"
+      },
+      "id": "parse-message",
+      "name": "Parse Inbound Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, email, first_name, lead_status, client_id FROM contacts WHERE phone LIKE '%{{ $json.from.slice(-10) }}%' LIMIT 1",
+        "options": {}
+      },
+      "id": "find-contact",
+      "name": "Find Contact by Phone",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "functionCode": "const contact = $input.first().json;\nconst message = $node['Parse Inbound Message'].json;\n\nconst isKnown = !!contact.id;\nconst contactId = contact.id || null;\n\n// Simple intent detection\nconst text = message.text.toLowerCase();\nlet intent = 'general';\nif (text.includes('harga') || text.includes('price') || text.includes('biaya')) intent = 'pricing';\nelse if (text.includes('demo') || text.includes('coba')) intent = 'demo_request';\nelse if (text.includes('bantuan') || text.includes('help') || text.includes('masalah')) intent = 'support';\nelse if (text.includes('berhenti') || text.includes('stop') || text.includes('unsubscribe')) intent = 'unsubscribe';\n\nreturn [{\n  json: {\n    ...message,\n    contact_id: contactId,\n    contact_name_db: contact.first_name || message.contact_name,\n    is_known_contact: isKnown,\n    client_id: contact.client_id,\n    intent: intent,\n    needs_human: intent === 'support' || intent === 'unsubscribe'\n  }\n}];"
+      },
+      "id": "enrich-message",
+      "name": "Enrich & Detect Intent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO message_log (client_id, contact_id, channel, direction, phone, message_body, status) VALUES ({{ $json.client_id || 'NULL' }}, {{ $json.contact_id || 'NULL' }}, 'whatsapp', 'inbound', '{{ $json.from }}', '{{ ($json.text || '').replace(/'/g, \"''\").substring(0, 500) }}', 'received'); {{ $json.contact_id ? \"INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) VALUES (\" + $json.contact_id + \", 'whatsapp_inbound', '{\\\"intent\\\": \\\"\" + $json.intent + \"\\\", \\\"message_preview\\\": \\\"\" + ($json.text || '').substring(0, 100).replace(/'/g, \"''\") + \"\\\"}', 5);\" : '' }}",
+        "options": {}
+      },
+      "id": "log-message",
+      "name": "Log Message",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{ "value1": "={{ $json.needs_human }}", "value2": true }]
+        }
+      },
+      "id": "needs-human",
+      "name": "Needs Human?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1350, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#support-queue",
+        "text": "📱 *WhatsApp Message - Human Needed*\n\n*From:* {{ $json.from }} ({{ $json.contact_name_db || $json.contact_name }})\n*Intent:* {{ $json.intent }}\n*Message:* {{ $json.text }}\n*Known Contact:* {{ $json.is_known_contact ? 'Yes' : 'No' }}\n\nPlease respond via WhatsApp Business.",
+        "options": {}
+      },
+      "id": "escalate-human",
+      "name": "Escalate to Human",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1570, 200],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack Bot" } }
+    },
+    {
+      "parameters": {
+        "url": "https://graph.facebook.com/v18.0/{{ $env.WHATSAPP_PHONE_ID }}/messages",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [{ "name": "body", "value": "={{ JSON.stringify({ messaging_product: 'whatsapp', to: $json.from, type: 'text', text: { body: $json.intent === 'pricing' ? 'Terima kasih atas ketertarikan Anda! Tim kami akan segera menghubungi Anda dengan informasi harga. Atau kunjungi website kami di https://' + ($env.COMPANY_DOMAIN || 'greevo.id') + '/pricing' : $json.intent === 'demo_request' ? 'Terima kasih! Kami akan menjadwalkan demo untuk Anda. Tim sales kami akan menghubungi dalam 1x24 jam.' : 'Terima kasih atas pesan Anda! Tim kami akan segera merespons. Jam operasional: Senin-Jumat, 09:00-17:00 WIB.' } }) }}" }]
+        },
+        "options": { "timeout": 15000 }
+      },
+      "id": "auto-reply",
+      "name": "Auto Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1570, 400],
+      "credentials": { "httpHeaderAuth": { "id": "whatsapp-cred", "name": "WhatsApp Business API" } },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'ok' }) }}"
+      },
+      "id": "response-ok",
+      "name": "Response OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1790, 300]
+    }
+  ],
+  "connections": {
+    "WhatsApp Webhook": { "main": [[{ "node": "Parse Inbound Message", "type": "main", "index": 0 }]] },
+    "WhatsApp Verify": { "main": [[{ "node": "Handle Verification", "type": "main", "index": 0 }]] },
+    "Parse Inbound Message": { "main": [[{ "node": "Find Contact by Phone", "type": "main", "index": 0 }]] },
+    "Find Contact by Phone": { "main": [[{ "node": "Enrich & Detect Intent", "type": "main", "index": 0 }]] },
+    "Enrich & Detect Intent": { "main": [[{ "node": "Log Message", "type": "main", "index": 0 }]] },
+    "Log Message": { "main": [[{ "node": "Needs Human?", "type": "main", "index": 0 }]] },
+    "Needs Human?": { "main": [[{ "node": "Escalate to Human", "type": "main", "index": 0 }], [{ "node": "Auto Reply", "type": "main", "index": 0 }]] },
+    "Escalate to Human": { "main": [[{ "node": "Response OK", "type": "main", "index": 0 }]] },
+    "Auto Reply": { "main": [[{ "node": "Response OK", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Integration" }, { "name": "WhatsApp" }, { "name": "Messaging" }]
+}

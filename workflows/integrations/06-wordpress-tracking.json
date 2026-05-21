@@ -1,0 +1,111 @@
+{
+  "name": "Integration - WordPress Form & Tracking",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "wordpress/form-submit",
+        "responseMode": "responseNode",
+        "options": { "rawBody": true }
+      },
+      "id": "wp-form-webhook",
+      "name": "WordPress Form Submit",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 200]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "wordpress/page-view",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "wp-pageview-webhook",
+      "name": "WordPress Page View",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 450]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\n\n// Support Contact Form 7, WPForms, Gravity Forms\nconst formData = {\n  email: body.email || body.your_email || body['your-email'] || body.field_email,\n  first_name: body.first_name || body.your_name?.split(' ')[0] || body['your-name']?.split(' ')[0] || body.field_name?.split(' ')[0] || '',\n  last_name: body.last_name || body.your_name?.split(' ').slice(1).join(' ') || '',\n  company: body.company || body.your_company || body.field_company || '',\n  phone: body.phone || body.your_phone || body['your-phone'] || body.field_phone || '',\n  message: body.message || body.your_message || body['your-message'] || body.field_message || '',\n  form_name: body.form_name || body._wpcf7 || body.form_id || 'unknown',\n  page_url: body.page_url || body.referrer || '',\n  source: 'wordpress',\n  utm_source: body.utm_source || '',\n  utm_medium: body.utm_medium || '',\n  utm_campaign: body.utm_campaign || '',\n  client_id: body.client_id\n};\n\nif (!formData.email) return [{ json: { error: true, message: 'No email found' } }];\n\nreturn [{ json: formData }];"
+      },
+      "id": "parse-form",
+      "name": "Parse Form Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO contacts (email, first_name, last_name, company, phone, source, custom_fields, client_id) VALUES ('{{ $json.email }}', '{{ $json.first_name }}', '{{ $json.last_name }}', '{{ $json.company }}', '{{ $json.phone }}', 'wordpress', '{{ JSON.stringify({form_name: $json.form_name, page_url: $json.page_url, message: $json.message, utm_source: $json.utm_source, utm_medium: $json.utm_medium, utm_campaign: $json.utm_campaign}) }}'::jsonb, {{ $json.client_id || 'NULL' }}) ON CONFLICT (email) DO UPDATE SET first_name = COALESCE(NULLIF(EXCLUDED.first_name, ''), contacts.first_name), company = COALESCE(NULLIF(EXCLUDED.company, ''), contacts.company), phone = COALESCE(NULLIF(EXCLUDED.phone, ''), contacts.phone), custom_fields = contacts.custom_fields || EXCLUDED.custom_fields, updated_at = NOW() RETURNING id, email, lead_score",
+        "options": {}
+      },
+      "id": "upsert-contact",
+      "name": "Upsert Contact",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 200],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) VALUES ({{ $json.id }}, 'form_submit', '{\"form\": \"{{ $node['Parse Form Data'].json.form_name }}\", \"page\": \"{{ $node['Parse Form Data'].json.page_url }}\", \"has_message\": {{ !!$node['Parse Form Data'].json.message }}}'::jsonb, 10); UPDATE contacts SET lead_score = lead_score + 10 WHERE id = {{ $json.id }};",
+        "options": {}
+      },
+      "id": "log-form-submit",
+      "name": "Log Form Submit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 200],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, contact_id: $json.id }) }}"
+      },
+      "id": "response-form",
+      "name": "Response Form OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1130, 200]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\n\n// Track page view for known contacts (via cookie/email)\nconst email = body.email || body.visitor_email;\nif (!email) return [{ json: { tracked: false } }];\n\nreturn [{ json: {\n  email: email,\n  page_url: body.page_url || body.url || '',\n  page_title: body.page_title || body.title || '',\n  referrer: body.referrer || '',\n  time_on_page: body.time_on_page || 0,\n  scroll_depth: body.scroll_depth || 0\n}}];"
+      },
+      "id": "parse-pageview",
+      "name": "Parse Page View",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 450]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) SELECT c.id, 'page_view', '{{ JSON.stringify({url: $json.page_url, title: $json.page_title, time_on_page: $json.time_on_page, scroll_depth: $json.scroll_depth}) }}'::jsonb, CASE WHEN '{{ $json.page_url }}' LIKE '%pricing%' THEN 5 WHEN '{{ $json.page_url }}' LIKE '%demo%' THEN 5 WHEN '{{ $json.page_url }}' LIKE '%case-stud%' THEN 3 ELSE 1 END FROM contacts c WHERE c.email = '{{ $json.email }}' LIMIT 1; UPDATE contacts SET lead_score = lead_score + CASE WHEN '{{ $json.page_url }}' LIKE '%pricing%' THEN 5 WHEN '{{ $json.page_url }}' LIKE '%demo%' THEN 5 ELSE 1 END WHERE email = '{{ $json.email }}';",
+        "options": {}
+      },
+      "id": "log-pageview",
+      "name": "Log Page View",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 450],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    }
+  ],
+  "connections": {
+    "WordPress Form Submit": { "main": [[{ "node": "Parse Form Data", "type": "main", "index": 0 }]] },
+    "Parse Form Data": { "main": [[{ "node": "Upsert Contact", "type": "main", "index": 0 }]] },
+    "Upsert Contact": { "main": [[{ "node": "Log Form Submit", "type": "main", "index": 0 }]] },
+    "Log Form Submit": { "main": [[{ "node": "Response Form OK", "type": "main", "index": 0 }]] },
+    "WordPress Page View": { "main": [[{ "node": "Parse Page View", "type": "main", "index": 0 }]] },
+    "Parse Page View": { "main": [[{ "node": "Log Page View", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Integration" }, { "name": "WordPress" }, { "name": "Tracking" }]
+}

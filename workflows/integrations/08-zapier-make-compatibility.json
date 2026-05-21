@@ -1,0 +1,187 @@
+{
+  "name": "Integration - Zapier/Make Webhook Compatibility",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "api/v1/contacts",
+        "responseMode": "responseNode",
+        "options": { "rawBody": true }
+      },
+      "id": "api-contacts",
+      "name": "API - Contacts",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 200]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "api/v1/events",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "api-events",
+      "name": "API - Events",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 450]
+    },
+    {
+      "parameters": {
+        "httpMethod": "GET",
+        "path": "api/v1/contacts",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "api-get-contacts",
+      "name": "API - Get Contacts",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 700]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst headers = input.headers || {};\nconst apiKey = headers['x-api-key'] || headers['authorization']?.replace('Bearer ', '');\n\nif (!apiKey) return [{ json: { error: true, status: 401, message: 'API key required' } }];\n\nconst body = input.body || input;\nconst contact = {\n  email: body.email,\n  first_name: body.first_name || body.firstName || '',\n  last_name: body.last_name || body.lastName || '',\n  company: body.company || body.organization || '',\n  phone: body.phone || body.phoneNumber || '',\n  source: body.source || 'api',\n  tags: body.tags || [],\n  custom_fields: body.custom_fields || body.properties || {}\n};\n\nif (!contact.email) return [{ json: { error: true, status: 400, message: 'Email required' } }];\n\nreturn [{ json: { ...contact, api_key: apiKey } }];"
+      },
+      "id": "validate-contact-api",
+      "name": "Validate Contact API",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.id as client_id FROM clients c WHERE c.api_key = '{{ $json.api_key }}' AND c.status = 'active' LIMIT 1",
+        "options": {}
+      },
+      "id": "verify-key",
+      "name": "Verify API Key",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 200],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [{ "value1": "={{ $json.client_id }}", "operation": "isNotEmpty" }]
+        }
+      },
+      "id": "is-valid-key",
+      "name": "Valid Key?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [910, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO contacts (email, first_name, last_name, company, phone, source, tags, custom_fields, client_id) VALUES ('{{ $node['Validate Contact API'].json.email }}', '{{ $node['Validate Contact API'].json.first_name }}', '{{ $node['Validate Contact API'].json.last_name }}', '{{ $node['Validate Contact API'].json.company }}', '{{ $node['Validate Contact API'].json.phone }}', '{{ $node['Validate Contact API'].json.source }}', ARRAY[{{ ($node['Validate Contact API'].json.tags || []).map(t => \"'\" + t + \"'\").join(',') || \"''\" }}], '{{ JSON.stringify($node['Validate Contact API'].json.custom_fields || {}) }}'::jsonb, {{ $json.client_id }}) ON CONFLICT (email) DO UPDATE SET first_name = COALESCE(NULLIF(EXCLUDED.first_name,''), contacts.first_name), last_name = COALESCE(NULLIF(EXCLUDED.last_name,''), contacts.last_name), company = COALESCE(NULLIF(EXCLUDED.company,''), contacts.company), updated_at = NOW() RETURNING id, email, lead_score, lead_status",
+        "options": {}
+      },
+      "id": "upsert-api-contact",
+      "name": "Upsert Contact",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 150],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, data: { id: $json.id, email: $json.email, lead_score: $json.lead_score, status: $json.lead_status } }) }}"
+      },
+      "id": "response-contact-ok",
+      "name": "Response: Contact OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1350, 150]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: false, error: 'Unauthorized' }) }}",
+        "options": { "responseCode": 401 }
+      },
+      "id": "response-401",
+      "name": "Response: 401",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1130, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\n\nreturn [{ json: {\n  email: body.email,\n  event_name: body.event || body.event_name,\n  properties: body.properties || body.data || {},\n  timestamp: body.timestamp || new Date().toISOString(),\n  api_key: (input.headers || {})['x-api-key']\n}}];"
+      },
+      "id": "parse-event",
+      "name": "Parse Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 450]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO lead_activities (contact_id, activity_type, activity_data, score_impact) SELECT c.id, '{{ $json.event_name }}', '{{ JSON.stringify($json.properties) }}'::jsonb, CASE WHEN '{{ $json.event_name }}' IN ('purchase', 'signup', 'demo_request') THEN 15 WHEN '{{ $json.event_name }}' IN ('page_view', 'email_opened') THEN 3 ELSE 5 END FROM contacts c WHERE c.email = '{{ $json.email }}' LIMIT 1 RETURNING contact_id",
+        "options": {}
+      },
+      "id": "log-event",
+      "name": "Log Event",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 450],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, event: $node['Parse Event'].json.event_name }) }}"
+      },
+      "id": "response-event-ok",
+      "name": "Response: Event OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [910, 450]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, email, first_name, last_name, company, lead_score, lead_status, source, created_at FROM contacts ORDER BY created_at DESC LIMIT 100",
+        "options": {}
+      },
+      "id": "get-contacts-list",
+      "name": "Get Contacts List",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 700],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, data: $input.all().map(i => i.json), count: $input.all().length }) }}"
+      },
+      "id": "response-list",
+      "name": "Response: List",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [690, 700]
+    }
+  ],
+  "connections": {
+    "API - Contacts": { "main": [[{ "node": "Validate Contact API", "type": "main", "index": 0 }]] },
+    "Validate Contact API": { "main": [[{ "node": "Verify API Key", "type": "main", "index": 0 }]] },
+    "Verify API Key": { "main": [[{ "node": "Valid Key?", "type": "main", "index": 0 }]] },
+    "Valid Key?": { "main": [[{ "node": "Upsert Contact", "type": "main", "index": 0 }], [{ "node": "Response: 401", "type": "main", "index": 0 }]] },
+    "Upsert Contact": { "main": [[{ "node": "Response: Contact OK", "type": "main", "index": 0 }]] },
+    "API - Events": { "main": [[{ "node": "Parse Event", "type": "main", "index": 0 }]] },
+    "Parse Event": { "main": [[{ "node": "Log Event", "type": "main", "index": 0 }]] },
+    "Log Event": { "main": [[{ "node": "Response: Event OK", "type": "main", "index": 0 }]] },
+    "API - Get Contacts": { "main": [[{ "node": "Get Contacts List", "type": "main", "index": 0 }]] },
+    "Get Contacts List": { "main": [[{ "node": "Response: List", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Integration" }, { "name": "API" }, { "name": "Zapier" }, { "name": "Make" }]
+}

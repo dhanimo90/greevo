@@ -1,0 +1,78 @@
+{
+  "name": "Integration - Google Sheets Sync",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "cronExpression", "expression": "0 */6 * * *" }] }
+      },
+      "id": "every-6h",
+      "name": "Every 6 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.id, c.email, c.first_name, c.last_name, c.company, c.job_title, c.phone, c.lead_score, c.lead_status, c.source, c.created_at::date as created_date, (SELECT COUNT(*) FROM lead_activities la WHERE la.contact_id = c.id) as total_activities, (SELECT MAX(la.created_at)::date FROM lead_activities la WHERE la.contact_id = c.id) as last_activity_date FROM contacts c WHERE c.updated_at > NOW() - INTERVAL '6 hours' OR c.created_at > NOW() - INTERVAL '6 hours' ORDER BY c.updated_at DESC LIMIT 500",
+        "options": {}
+      },
+      "id": "get-contacts",
+      "name": "Get Updated Contacts",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "functionCode": "const contacts = $input.all().map(i => i.json);\nif (!contacts.length || !contacts[0].id) return [];\n\n// Format for Google Sheets (flat structure)\nreturn contacts.map(c => ({\n  json: {\n    ID: c.id,\n    Email: c.email,\n    'First Name': c.first_name || '',\n    'Last Name': c.last_name || '',\n    Company: c.company || '',\n    'Job Title': c.job_title || '',\n    Phone: c.phone || '',\n    'Lead Score': c.lead_score || 0,\n    Status: c.lead_status || 'new',\n    Source: c.source || '',\n    'Created Date': c.created_date || '',\n    'Total Activities': c.total_activities || 0,\n    'Last Activity': c.last_activity_date || ''\n  }\n}));"
+      },
+      "id": "format-for-sheets",
+      "name": "Format for Sheets",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "operation": "appendOrUpdate",
+        "documentId": "={{ $env.GOOGLE_SHEET_ID }}",
+        "sheetName": "Contacts",
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "matchingColumns": ["ID"]
+        },
+        "options": {}
+      },
+      "id": "update-sheets",
+      "name": "Update Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.2,
+      "position": [910, 300],
+      "credentials": { "googleSheetsOAuth2Api": { "id": "google-sheets-cred", "name": "Google Sheets OAuth2" } },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT log_audit(NULL, 'google-sheets-sync', 'sheets_sync_completed', 'integration', NULL, '{\"rows_synced\": {{ $input.all().length }}, \"sheet\": \"Contacts\"}'::jsonb, 'success')",
+        "options": {}
+      },
+      "id": "log-sync",
+      "name": "Log Sync",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    }
+  ],
+  "connections": {
+    "Every 6 Hours": { "main": [[{ "node": "Get Updated Contacts", "type": "main", "index": 0 }]] },
+    "Get Updated Contacts": { "main": [[{ "node": "Format for Sheets", "type": "main", "index": 0 }]] },
+    "Format for Sheets": { "main": [[{ "node": "Update Google Sheets", "type": "main", "index": 0 }]] },
+    "Update Google Sheets": { "main": [[{ "node": "Log Sync", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Integration" }, { "name": "Google Sheets" }, { "name": "Sync" }]
+}

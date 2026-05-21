@@ -1,0 +1,126 @@
+{
+  "name": "Integration - Salesforce Bidirectional Sync",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "minutes", "minutesInterval": 15 }] }
+      },
+      "id": "every-15min",
+      "name": "Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SALESFORCE_INSTANCE_URL }}/services/data/v58.0/query",
+        "method": "GET",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "q", "value": "SELECT Id, Email, FirstName, LastName, Company, Phone, Title, LeadSource, Status, LastModifiedDate FROM Lead WHERE LastModifiedDate > {{ new Date(Date.now() - 15*60*1000).toISOString() }} LIMIT 200" }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "fetch-sf-leads",
+      "name": "Fetch Salesforce Leads",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [470, 200],
+      "credentials": { "oAuth2Api": { "id": "salesforce-oauth", "name": "Salesforce OAuth2" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, email, first_name, last_name, company, phone, lead_status, external_id, updated_at FROM contacts WHERE updated_at > NOW() - INTERVAL '15 minutes' AND (source != 'salesforce' OR source IS NULL)",
+        "options": {}
+      },
+      "id": "get-local-changes",
+      "name": "Get Local Changes",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 450],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "functionCode": "const sfResponse = $node['Fetch Salesforce Leads'].json;\nconst records = sfResponse.records || [];\nconst results = [];\n\nconst statusMap = { 'Open - Not Contacted': 'new', 'Working - Contacted': 'contacted', 'Closed - Converted': 'customer', 'Closed - Not Converted': 'lost' };\n\nfor (const lead of records) {\n  results.push({ json: {\n    email: lead.Email,\n    first_name: lead.FirstName || '',\n    last_name: lead.LastName || '',\n    company: lead.Company || '',\n    phone: lead.Phone || '',\n    job_title: lead.Title || '',\n    source: 'salesforce',\n    external_id: lead.Id,\n    lead_status: statusMap[lead.Status] || 'new'\n  }});\n}\nreturn results;"
+      },
+      "id": "transform-sf-data",
+      "name": "Transform SF Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO contacts (email, first_name, last_name, company, phone, job_title, source, external_id, lead_status) VALUES ('{{ $json.email }}', '{{ $json.first_name }}', '{{ $json.last_name }}', '{{ $json.company }}', '{{ $json.phone }}', '{{ $json.job_title }}', 'salesforce', '{{ $json.external_id }}', '{{ $json.lead_status }}') ON CONFLICT (email) DO UPDATE SET first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name, company = EXCLUDED.company, phone = EXCLUDED.phone, external_id = EXCLUDED.external_id, lead_status = EXCLUDED.lead_status, updated_at = NOW()",
+        "options": {}
+      },
+      "id": "upsert-from-sf",
+      "name": "Upsert from Salesforce",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 200],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "functionCode": "const localContacts = $input.all().map(i => i.json);\nif (!localContacts.length || !localContacts[0].id) return [];\n\nconst statusMap = { 'new': 'Open - Not Contacted', 'contacted': 'Working - Contacted', 'qualified': 'Working - Contacted', 'customer': 'Closed - Converted', 'lost': 'Closed - Not Converted' };\n\nreturn localContacts.map(c => ({ json: {\n  sf_id: c.external_id,\n  email: c.email,\n  FirstName: c.first_name,\n  LastName: c.last_name || c.email.split('@')[0],\n  Company: c.company || 'Unknown',\n  Phone: c.phone,\n  Status: statusMap[c.lead_status] || 'Open - Not Contacted',\n  has_sf_id: !!c.external_id\n}}));"
+      },
+      "id": "transform-for-sf",
+      "name": "Transform for Salesforce",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 450]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SALESFORCE_INSTANCE_URL }}/services/data/v58.0/sobjects/Lead/{{ $json.has_sf_id ? $json.sf_id : '' }}",
+        "method": "={{ $json.has_sf_id ? 'PATCH' : 'POST' }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [{ "name": "body", "value": "={{ JSON.stringify({ FirstName: $json.FirstName, LastName: $json.LastName, Company: $json.Company, Email: $json.email, Phone: $json.Phone, Status: $json.Status }) }}" }]
+        },
+        "options": { "timeout": 15000 }
+      },
+      "id": "push-to-sf",
+      "name": "Push to Salesforce",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [910, 450],
+      "credentials": { "oAuth2Api": { "id": "salesforce-oauth", "name": "Salesforce OAuth2" } },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT log_audit(NULL, 'salesforce-sync', 'sf_sync_completed', 'integration', NULL, '{\"direction\": \"bidirectional\", \"from_sf\": {{ $node['Transform SF Data'].json ? 1 : 0 }}, \"to_sf\": {{ $node['Transform for Salesforce'].json ? 1 : 0 }}}'::jsonb, 'success')",
+        "options": {}
+      },
+      "id": "log-sync",
+      "name": "Log Sync",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 350],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    }
+  ],
+  "connections": {
+    "Every 15 Minutes": { "main": [[{ "node": "Fetch Salesforce Leads", "type": "main", "index": 0 }, { "node": "Get Local Changes", "type": "main", "index": 0 }]] },
+    "Fetch Salesforce Leads": { "main": [[{ "node": "Transform SF Data", "type": "main", "index": 0 }]] },
+    "Transform SF Data": { "main": [[{ "node": "Upsert from Salesforce", "type": "main", "index": 0 }]] },
+    "Upsert from Salesforce": { "main": [[{ "node": "Log Sync", "type": "main", "index": 0 }]] },
+    "Get Local Changes": { "main": [[{ "node": "Transform for Salesforce", "type": "main", "index": 0 }]] },
+    "Transform for Salesforce": { "main": [[{ "node": "Push to Salesforce", "type": "main", "index": 0 }]] },
+    "Push to Salesforce": { "main": [[{ "node": "Log Sync", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Integration" }, { "name": "Salesforce" }, { "name": "CRM" }]
+}

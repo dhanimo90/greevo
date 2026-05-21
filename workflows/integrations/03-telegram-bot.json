@@ -1,0 +1,116 @@
+{
+  "name": "Integration - Telegram Bot Notifications",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "telegram/webhook",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "tg-webhook",
+      "name": "Telegram Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\nconst message = body.message || body.callback_query?.message;\n\nif (!message) return [{ json: { skip: true } }];\n\nconst text = message.text || '';\nconst chatId = message.chat?.id;\nconst userId = message.from?.id;\nconst username = message.from?.username || '';\n\n// Parse commands\nlet command = null;\nlet args = '';\nif (text.startsWith('/')) {\n  const parts = text.split(' ');\n  command = parts[0].toLowerCase();\n  args = parts.slice(1).join(' ');\n}\n\nreturn [{\n  json: {\n    chat_id: chatId,\n    user_id: userId,\n    username: username,\n    text: text,\n    command: command,\n    args: args,\n    is_command: !!command\n  }\n}];"
+      },
+      "id": "parse-tg",
+      "name": "Parse Telegram Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const msg = $input.first().json;\nlet responseText = '';\n\nswitch (msg.command) {\n  case '/start':\n    responseText = '👋 Welcome to GreeVo Bot!\\n\\nCommands:\\n/status - System status\\n/leads - Today\\'s new leads\\n/pipeline - Pipeline summary\\n/seo - SEO overview\\n/help - Show commands';\n    break;\n  case '/status':\n    responseText = '__STATUS_QUERY__';\n    break;\n  case '/leads':\n    responseText = '__LEADS_QUERY__';\n    break;\n  case '/pipeline':\n    responseText = '__PIPELINE_QUERY__';\n    break;\n  case '/seo':\n    responseText = '__SEO_QUERY__';\n    break;\n  case '/help':\n    responseText = '📋 *Available Commands:*\\n\\n/status - System health\\n/leads - New leads today\\n/pipeline - Sales pipeline\\n/seo - SEO metrics\\n/help - This message';\n    break;\n  default:\n    responseText = 'Unknown command. Type /help for available commands.';\n}\n\nreturn [{ json: { ...msg, response_text: responseText, needs_query: responseText.includes('__') } }];"
+      },
+      "id": "handle-command",
+      "name": "Handle Command",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{ "value1": "={{ $json.needs_query }}", "value2": true }]
+        }
+      },
+      "id": "needs-db",
+      "name": "Needs DB Query?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT CASE '{{ $json.command }}' WHEN '/status' THEN (SELECT json_build_object('type', 'status', 'active_workflows', (SELECT COUNT(*) FROM workflow_execution_stats WHERE started_at > NOW() - INTERVAL '1 hour'), 'errors_1h', (SELECT COUNT(*) FROM workflow_execution_stats WHERE status = 'error' AND started_at > NOW() - INTERVAL '1 hour'), 'total_contacts', (SELECT COUNT(*) FROM contacts), 'active_deals', (SELECT COUNT(*) FROM deals WHERE stage NOT IN ('closed_won','closed_lost')))::text WHEN '/leads' THEN (SELECT json_build_object('type', 'leads', 'today', (SELECT COUNT(*) FROM contacts WHERE created_at > CURRENT_DATE), 'hot', (SELECT COUNT(*) FROM contacts WHERE lead_score >= 80), 'recent', (SELECT json_agg(json_build_object('name', first_name || ' ' || last_name, 'company', company, 'score', lead_score)) FROM (SELECT * FROM contacts WHERE created_at > CURRENT_DATE ORDER BY created_at DESC LIMIT 5) sub))::text WHEN '/pipeline' THEN (SELECT json_build_object('type', 'pipeline', 'total_value', (SELECT COALESCE(SUM(deal_value),0) FROM deals WHERE stage NOT IN ('closed_won','closed_lost')), 'deal_count', (SELECT COUNT(*) FROM deals WHERE stage NOT IN ('closed_won','closed_lost')), 'won_mtd', (SELECT COALESCE(SUM(deal_value),0) FROM deals WHERE stage = 'closed_won' AND updated_at > date_trunc('month', NOW()))))::text WHEN '/seo' THEN (SELECT json_build_object('type', 'seo', 'keywords', (SELECT COUNT(*) FROM tracked_keywords WHERE is_active = true), 'top10', (SELECT COUNT(*) FROM keyword_rankings WHERE position <= 10 AND checked_at > NOW() - INTERVAL '1 day'), 'backlinks', (SELECT COUNT(*) FROM backlinks WHERE is_active = true)))::text END as result",
+        "options": {}
+      },
+      "id": "query-data",
+      "name": "Query Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 200],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "functionCode": "const queryResult = $input.first().json;\nconst msg = $node['Handle Command'].json;\nlet data;\ntry { data = JSON.parse(queryResult.result || '{}'); } catch(e) { data = {}; }\n\nlet text = '';\nswitch (data.type) {\n  case 'status':\n    text = `⚙️ *System Status*\\n\\n• Workflows (1h): ${data.active_workflows}\\n• Errors (1h): ${data.errors_1h}\\n• Total Contacts: ${data.total_contacts}\\n• Active Deals: ${data.active_deals}`;\n    break;\n  case 'leads':\n    const recent = data.recent || [];\n    text = `👥 *Leads Today*\\n\\n• New Today: ${data.today}\\n• Hot Leads: ${data.hot}\\n\\n*Recent:*\\n${recent.map(r => `• ${r.name} (${r.company}) - Score: ${r.score}`).join('\\n') || 'None yet'}`;\n    break;\n  case 'pipeline':\n    text = `💰 *Pipeline*\\n\\n• Value: Rp ${Number(data.total_value).toLocaleString('id-ID')}\\n• Deals: ${data.deal_count}\\n• Won MTD: Rp ${Number(data.won_mtd).toLocaleString('id-ID')}`;\n    break;\n  case 'seo':\n    text = `🔍 *SEO*\\n\\n• Keywords: ${data.keywords}\\n• Top 10: ${data.top10}\\n• Backlinks: ${data.backlinks}`;\n    break;\n  default:\n    text = 'Data not available.';\n}\n\nreturn [{ json: { chat_id: msg.chat_id, text: text } }];"
+      },
+      "id": "format-response",
+      "name": "Format Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1350, 200]
+    },
+    {
+      "parameters": {
+        "url": "https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "method": "POST",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "chat_id", "value": "={{ $json.chat_id }}" },
+            { "name": "text", "value": "={{ $json.text || $node['Handle Command'].json.response_text }}" },
+            { "name": "parse_mode", "value": "Markdown" }
+          ]
+        },
+        "options": { "timeout": 10000 }
+      },
+      "id": "send-tg-reply",
+      "name": "Send Telegram Reply",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1570, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ ok: true }) }}"
+      },
+      "id": "response-ok",
+      "name": "Response OK",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1790, 300]
+    }
+  ],
+  "connections": {
+    "Telegram Webhook": { "main": [[{ "node": "Parse Telegram Message", "type": "main", "index": 0 }]] },
+    "Parse Telegram Message": { "main": [[{ "node": "Handle Command", "type": "main", "index": 0 }]] },
+    "Handle Command": { "main": [[{ "node": "Needs DB Query?", "type": "main", "index": 0 }]] },
+    "Needs DB Query?": { "main": [[{ "node": "Query Data", "type": "main", "index": 0 }], [{ "node": "Send Telegram Reply", "type": "main", "index": 0 }]] },
+    "Query Data": { "main": [[{ "node": "Format Response", "type": "main", "index": 0 }]] },
+    "Format Response": { "main": [[{ "node": "Send Telegram Reply", "type": "main", "index": 0 }]] },
+    "Send Telegram Reply": { "main": [[{ "node": "Response OK", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Integration" }, { "name": "Telegram" }, { "name": "Bot" }]
+}
