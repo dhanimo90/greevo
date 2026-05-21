@@ -1,0 +1,10 @@
+{
+  "name": "greevo",
+  "private": true,
+  "scripts": {
+    "build": "cd dashboard && npm install && npm run build",
+    "dev": "cd dashboard && npm run dev",
+    "start": "cd dashboard && npm start",
+    "install:dashboard": "cd dashboard && npm install"
+  }
+}
