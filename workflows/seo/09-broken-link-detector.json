@@ -1,0 +1,153 @@
+{
+  "name": "SEO - Broken Link Detector & Internal Linking",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 1 * * 3" }]
+        }
+      },
+      "id": "weekly-wednesday",
+      "name": "Weekly Wednesday 1 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT url FROM site_health_checks WHERE checked_at > NOW() - INTERVAL '30 days' UNION SELECT DISTINCT target_url FROM backlinks WHERE is_active = true UNION SELECT DISTINCT url_ranked FROM keyword_rankings WHERE url_ranked IS NOT NULL AND checked_at > NOW() - INTERVAL '7 days' LIMIT 100",
+        "options": {}
+      },
+      "id": "get-urls-to-check",
+      "name": "Get URLs to Check",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 10,
+        "options": {}
+      },
+      "id": "batch-urls",
+      "name": "Batch URLs",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url || $json.target_url || $json.url_ranked }}",
+        "method": "HEAD",
+        "options": {
+          "timeout": 10000,
+          "redirect": { "redirect": { "followRedirects": false } }
+        }
+      },
+      "id": "check-url",
+      "name": "Check URL",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [910, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "functionCode": "const items = $input.all();\nconst brokenLinks = [];\nconst redirects = [];\nconst healthy = [];\n\nfor (const item of items) {\n  const response = item.json;\n  const url = $node['Batch URLs'].json.url || $node['Batch URLs'].json.target_url || $node['Batch URLs'].json.url_ranked;\n  const statusCode = response.statusCode || response.status || 0;\n  \n  if (statusCode >= 400 || statusCode === 0) {\n    brokenLinks.push({\n      url: url,\n      status_code: statusCode,\n      error: response.error || `HTTP ${statusCode}`\n    });\n  } else if (statusCode >= 300 && statusCode < 400) {\n    redirects.push({\n      url: url,\n      status_code: statusCode,\n      redirect_to: response.headers?.location || 'Unknown'\n    });\n  } else {\n    healthy.push({ url: url, status_code: statusCode });\n  }\n}\n\nreturn [{\n  json: {\n    total_checked: items.length,\n    broken: brokenLinks,\n    redirects: redirects,\n    healthy_count: healthy.length,\n    broken_count: brokenLinks.length,\n    redirect_count: redirects.length,\n    has_broken: brokenLinks.length > 0\n  }\n}];"
+      },
+      "id": "categorize-results",
+      "name": "Categorize Results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1130, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.has_broken }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "has-broken",
+      "name": "Has Broken Links?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1350, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#seo-alerts",
+        "text": "🔗 *Broken Link Report*\n\n*Checked:* {{ $json.total_checked }} URLs\n• ✅ Healthy: {{ $json.healthy_count }}\n• ❌ Broken: {{ $json.broken_count }}\n• ↪️ Redirects: {{ $json.redirect_count }}\n\n{{ $json.broken_count > 0 ? '*Broken Links:*\\n' + $json.broken.map(b => `• ${b.url} → ${b.status_code} ${b.error}`).join('\\n') : '' }}\n\n{{ $json.redirect_count > 0 ? '\\n*Redirects (consider updating):*\\n' + $json.redirects.slice(0, 5).map(r => `• ${r.url} → ${r.status_code} → ${r.redirect_to}`).join('\\n') : '' }}\n\n_Fix broken links to preserve link equity and user experience_",
+        "options": {}
+      },
+      "id": "alert-broken",
+      "name": "Alert Broken Links",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1570, 250],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO analytics_snapshots (report_type, period_start, period_end, metrics, source) VALUES ('weekly', CURRENT_DATE, CURRENT_DATE, '{{ JSON.stringify($json) }}'::jsonb, 'broken_link_check')",
+        "options": {}
+      },
+      "id": "save-results",
+      "name": "Save Results",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1570, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Weekly Wednesday 1 AM": {
+      "main": [[{ "node": "Get URLs to Check", "type": "main", "index": 0 }]]
+    },
+    "Get URLs to Check": {
+      "main": [[{ "node": "Batch URLs", "type": "main", "index": 0 }]]
+    },
+    "Batch URLs": {
+      "main": [[{ "node": "Check URL", "type": "main", "index": 0 }]]
+    },
+    "Check URL": {
+      "main": [[{ "node": "Categorize Results", "type": "main", "index": 0 }]]
+    },
+    "Categorize Results": {
+      "main": [[{ "node": "Has Broken Links?", "type": "main", "index": 0 }]]
+    },
+    "Has Broken Links?": {
+      "main": [
+        [{ "node": "Alert Broken Links", "type": "main", "index": 0 }],
+        [{ "node": "Save Results", "type": "main", "index": 0 }]
+      ]
+    },
+    "Alert Broken Links": {
+      "main": [[{ "node": "Save Results", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "SEO" }, { "name": "Broken Links" }, { "name": "Technical" }]
+}

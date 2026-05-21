@@ -1,0 +1,109 @@
+{
+  "name": "SEO - Automated Technical SEO Audit",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 2 * * 1" }]
+        }
+      },
+      "id": "weekly-monday-2am",
+      "name": "Weekly Monday 2 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const domain = $env.COMPANY_DOMAIN || 'example.com';\nconst baseUrl = `https://${domain}`;\n\nconst checks = [\n  { type: 'robots_txt', url: `${baseUrl}/robots.txt`, description: 'Robots.txt' },\n  { type: 'sitemap', url: `${baseUrl}/sitemap.xml`, description: 'Sitemap XML' },\n  { type: 'sitemap_index', url: `${baseUrl}/sitemap_index.xml`, description: 'Sitemap Index' },\n  { type: 'favicon', url: `${baseUrl}/favicon.ico`, description: 'Favicon' },\n  { type: 'security_txt', url: `${baseUrl}/.well-known/security.txt`, description: 'Security.txt' }\n];\n\nreturn checks.map(c => ({ json: { ...c, domain, baseUrl } }));"
+      },
+      "id": "define-checks",
+      "name": "Define Technical Checks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "method": "GET",
+        "options": {
+          "timeout": 15000,
+          "redirect": { "redirect": { "followRedirects": true } },
+          "response": { "response": { "fullResponse": true } }
+        }
+      },
+      "id": "fetch-resource",
+      "name": "Fetch Resource",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [690, 300],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "functionCode": "const items = $input.all();\nconst results = [];\nconst issues = [];\nlet score = 100;\n\nfor (const item of items) {\n  const response = item.json;\n  const checkInfo = $node['Define Technical Checks'].json;\n  const statusCode = response.statusCode || response.status || 0;\n  const body = response.body || response.data || '';\n  const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);\n  \n  let checkResult = { type: checkInfo.type, url: checkInfo.url, status: 'pass', details: {} };\n\n  switch (checkInfo.type) {\n    case 'robots_txt':\n      if (statusCode !== 200) {\n        checkResult.status = 'fail';\n        issues.push({ severity: 'high', message: 'robots.txt not found (404)', fix: 'Create a robots.txt file in your root directory' });\n        score -= 15;\n      } else {\n        const hasDisallowAll = bodyStr.includes('Disallow: /');\n        const hasSitemap = bodyStr.toLowerCase().includes('sitemap:');\n        if (hasDisallowAll && !bodyStr.includes('Disallow: /admin')) {\n          issues.push({ severity: 'critical', message: 'robots.txt blocks all crawling', fix: 'Review Disallow rules' });\n          score -= 30;\n        }\n        if (!hasSitemap) {\n          issues.push({ severity: 'medium', message: 'robots.txt missing Sitemap directive', fix: 'Add Sitemap: https://domain.com/sitemap.xml' });\n          score -= 5;\n        }\n        checkResult.details = { has_sitemap_ref: hasSitemap, blocks_all: hasDisallowAll };\n      }\n      break;\n\n    case 'sitemap':\n    case 'sitemap_index':\n      if (statusCode !== 200) {\n        if (checkInfo.type === 'sitemap') {\n          checkResult.status = 'fail';\n          issues.push({ severity: 'high', message: 'sitemap.xml not found', fix: 'Generate and submit a sitemap' });\n          score -= 15;\n        }\n      } else {\n        const isXml = bodyStr.includes('<?xml') || bodyStr.includes('<urlset') || bodyStr.includes('<sitemapindex');\n        if (!isXml) {\n          issues.push({ severity: 'medium', message: 'Sitemap is not valid XML', fix: 'Ensure sitemap returns proper XML format' });\n          score -= 10;\n        }\n        const urlCount = (bodyStr.match(/<loc>/g) || []).length;\n        checkResult.details = { is_valid_xml: isXml, url_count: urlCount };\n      }\n      break;\n\n    case 'favicon':\n      if (statusCode !== 200) {\n        checkResult.status = 'warning';\n        issues.push({ severity: 'low', message: 'Favicon not found', fix: 'Add a favicon.ico to your root directory' });\n        score -= 3;\n      }\n      break;\n  }\n\n  results.push(checkResult);\n}\n\nreturn [{\n  json: {\n    domain: $node['Define Technical Checks'].json.domain,\n    audit_score: Math.max(0, score),\n    total_checks: results.length,\n    passed: results.filter(r => r.status === 'pass').length,\n    failed: results.filter(r => r.status === 'fail').length,\n    warnings: results.filter(r => r.status === 'warning').length,\n    issues: issues,\n    results: results,\n    audited_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "analyze-technical",
+      "name": "Analyze Technical SEO",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO analytics_snapshots (report_type, period_start, period_end, metrics, source) VALUES ('weekly', CURRENT_DATE, CURRENT_DATE, '{{ JSON.stringify($json) }}'::jsonb, 'technical_seo_audit')",
+        "options": {}
+      },
+      "id": "save-audit",
+      "name": "Save Audit",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#seo-reports",
+        "text": "🔧 *Weekly Technical SEO Audit*\n\n*Domain:* {{ $json.domain }}\n*Score:* {{ $json.audit_score }}/100 {{ $json.audit_score >= 80 ? '✅' : $json.audit_score >= 60 ? '⚠️' : '❌' }}\n*Checks:* {{ $json.passed }} passed | {{ $json.failed }} failed | {{ $json.warnings }} warnings\n\n{{ $json.issues.length > 0 ? '*Issues Found:*\\n' + $json.issues.map(i => `• [${i.severity.toUpperCase()}] ${i.message}\\n  Fix: ${i.fix}`).join('\\n') : '✅ No issues found!' }}",
+        "options": {}
+      },
+      "id": "report-audit",
+      "name": "Report Audit",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1350, 300],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Weekly Monday 2 AM": {
+      "main": [[{ "node": "Define Technical Checks", "type": "main", "index": 0 }]]
+    },
+    "Define Technical Checks": {
+      "main": [[{ "node": "Fetch Resource", "type": "main", "index": 0 }]]
+    },
+    "Fetch Resource": {
+      "main": [[{ "node": "Analyze Technical SEO", "type": "main", "index": 0 }]]
+    },
+    "Analyze Technical SEO": {
+      "main": [[{ "node": "Save Audit", "type": "main", "index": 0 }]]
+    },
+    "Save Audit": {
+      "main": [[{ "node": "Report Audit", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "SEO" }, { "name": "Technical Audit" }, { "name": "Weekly" }]
+}

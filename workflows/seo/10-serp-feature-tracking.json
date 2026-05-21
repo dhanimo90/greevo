@@ -1,0 +1,142 @@
+{
+  "name": "SEO - SERP Feature & Local SEO Tracking",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 7 * * 1,4" }]
+        }
+      },
+      "id": "twice-weekly",
+      "name": "Monday & Thursday 7 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT tk.id, tk.keyword, tk.target_url, tk.country FROM tracked_keywords tk WHERE tk.is_active = true ORDER BY (SELECT kr.search_volume FROM keyword_rankings kr WHERE kr.keyword_id = tk.id ORDER BY kr.checked_at DESC LIMIT 1) DESC NULLS LAST LIMIT 50",
+        "options": {}
+      },
+      "id": "get-top-keywords",
+      "name": "Get Top Keywords",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.ahrefs.com/v3/serp-overview",
+        "method": "GET",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "target", "value": "={{ $json.keyword }}" },
+            { "name": "country", "value": "={{ $json.country || 'id' }}" },
+            { "name": "limit", "value": "10" }
+          ]
+        },
+        "options": { "timeout": 30000 }
+      },
+      "id": "check-serp",
+      "name": "Check SERP Features",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [690, 300],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "ahrefs-cred",
+          "name": "Ahrefs API Key"
+        }
+      },
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "functionCode": "const items = $input.all();\nconst results = [];\n\nfor (const item of items) {\n  const data = item.json;\n  const keyword = $node['Get Top Keywords'].json;\n  const serpData = data.serp || data;\n  \n  // Detect SERP features\n  const features = {\n    featured_snippet: false,\n    people_also_ask: false,\n    local_pack: false,\n    knowledge_panel: false,\n    video_carousel: false,\n    image_pack: false,\n    shopping: false,\n    news: false,\n    sitelinks: false\n  };\n\n  // Parse from API response (structure varies by provider)\n  if (serpData.serp_features || serpData.features) {\n    const sf = serpData.serp_features || serpData.features || [];\n    for (const feature of sf) {\n      const name = (feature.type || feature.name || feature).toLowerCase();\n      if (name.includes('snippet') || name.includes('featured')) features.featured_snippet = true;\n      if (name.includes('people') || name.includes('paa') || name.includes('related')) features.people_also_ask = true;\n      if (name.includes('local') || name.includes('map')) features.local_pack = true;\n      if (name.includes('knowledge')) features.knowledge_panel = true;\n      if (name.includes('video')) features.video_carousel = true;\n      if (name.includes('image')) features.image_pack = true;\n      if (name.includes('shopping') || name.includes('product')) features.shopping = true;\n      if (name.includes('news') || name.includes('top stories')) features.news = true;\n      if (name.includes('sitelink')) features.sitelinks = true;\n    }\n  }\n\n  // Check if we own any features\n  const domain = $env.COMPANY_DOMAIN || '';\n  let ownsFeature = false;\n  if (serpData.featured_snippet_url?.includes(domain)) ownsFeature = true;\n\n  const activeFeatures = Object.entries(features).filter(([k, v]) => v).map(([k]) => k);\n\n  results.push({\n    json: {\n      keyword_id: keyword.id,\n      keyword: keyword.keyword,\n      features_detected: activeFeatures,\n      feature_count: activeFeatures.length,\n      owns_featured_snippet: ownsFeature,\n      has_local_pack: features.local_pack,\n      has_featured_snippet: features.featured_snippet,\n      has_paa: features.people_also_ask,\n      opportunity: features.featured_snippet && !ownsFeature ? 'featured_snippet' :\n                   features.people_also_ask ? 'paa_optimization' :\n                   features.local_pack ? 'local_seo' : 'standard'\n    }\n  });\n}\n\nreturn results;"
+      },
+      "id": "parse-serp-features",
+      "name": "Parse SERP Features",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const allResults = $input.all().map(i => i.json);\n\n// Summary\nconst summary = {\n  total_keywords: allResults.length,\n  with_featured_snippet: allResults.filter(r => r.has_featured_snippet).length,\n  with_paa: allResults.filter(r => r.has_paa).length,\n  with_local_pack: allResults.filter(r => r.has_local_pack).length,\n  we_own_snippet: allResults.filter(r => r.owns_featured_snippet).length\n};\n\n// Opportunities\nconst snippetOpportunities = allResults\n  .filter(r => r.has_featured_snippet && !r.owns_featured_snippet)\n  .map(r => r.keyword);\n\nconst localOpportunities = allResults\n  .filter(r => r.has_local_pack)\n  .map(r => r.keyword);\n\nreturn [{\n  json: {\n    summary,\n    snippet_opportunities: snippetOpportunities.slice(0, 10),\n    local_opportunities: localOpportunities.slice(0, 10),\n    all_results: allResults.slice(0, 20),\n    checked_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "summarize-features",
+      "name": "Summarize Features",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1130, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO analytics_snapshots (report_type, period_start, period_end, metrics, source) VALUES ('biweekly', CURRENT_DATE, CURRENT_DATE, '{{ JSON.stringify($json) }}'::jsonb, 'serp_features')",
+        "options": {}
+      },
+      "id": "save-serp-data",
+      "name": "Save SERP Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1350, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#seo-strategy",
+        "text": "🏆 *SERP Feature Tracking*\n\n*Summary ({{ $json.summary.total_keywords }} keywords):*\n• Featured Snippets: {{ $json.summary.with_featured_snippet }} (we own: {{ $json.summary.we_own_snippet }})\n• People Also Ask: {{ $json.summary.with_paa }}\n• Local Pack: {{ $json.summary.with_local_pack }}\n\n{{ $json.snippet_opportunities.length > 0 ? '💡 *Featured Snippet Opportunities:*\\n' + $json.snippet_opportunities.map((k, i) => `${i+1}. \"${k}\"`).join('\\n') + '\\n_Optimize content with direct answers to win these snippets_' : '✅ No new snippet opportunities' }}\n\n{{ $json.local_opportunities.length > 0 ? '\\n📍 *Local SEO Opportunities:*\\n' + $json.local_opportunities.slice(0, 5).map((k, i) => `${i+1}. \"${k}\"`).join('\\n') : '' }}",
+        "options": {}
+      },
+      "id": "report-features",
+      "name": "Report Features",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1570, 300],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Monday & Thursday 7 AM": {
+      "main": [[{ "node": "Get Top Keywords", "type": "main", "index": 0 }]]
+    },
+    "Get Top Keywords": {
+      "main": [[{ "node": "Check SERP Features", "type": "main", "index": 0 }]]
+    },
+    "Check SERP Features": {
+      "main": [[{ "node": "Parse SERP Features", "type": "main", "index": 0 }]]
+    },
+    "Parse SERP Features": {
+      "main": [[{ "node": "Summarize Features", "type": "main", "index": 0 }]]
+    },
+    "Summarize Features": {
+      "main": [[{ "node": "Save SERP Data", "type": "main", "index": 0 }]]
+    },
+    "Save SERP Data": {
+      "main": [[{ "node": "Report Features", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "SEO" }, { "name": "SERP Features" }, { "name": "Local SEO" }]
+}

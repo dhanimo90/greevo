@@ -1,0 +1,166 @@
+{
+  "name": "SEO - Core Web Vitals Monitoring",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 3 * * *" }]
+        }
+      },
+      "id": "daily-3am",
+      "name": "Daily 3 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const domain = $env.COMPANY_DOMAIN || 'example.com';\nconst criticalPages = [\n  '/',\n  '/products',\n  '/pricing',\n  '/blog',\n  '/contact',\n  '/signup'\n];\n\nreturn criticalPages.map(page => ({\n  json: {\n    url: `https://${domain}${page}`,\n    page_path: page\n  }\n}));"
+      },
+      "id": "define-pages",
+      "name": "Define Pages",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://www.googleapis.com/pagespeedonline/v5/runPagespeed",
+        "method": "GET",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "url", "value": "={{ $json.url }}" },
+            { "name": "key", "value": "={{ $env.GOOGLE_API_KEY }}" },
+            { "name": "category", "value": "performance" },
+            { "name": "strategy", "value": "mobile" }
+          ]
+        },
+        "options": { "timeout": 60000 }
+      },
+      "id": "pagespeed-mobile",
+      "name": "PageSpeed (Mobile)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [690, 200],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "https://www.googleapis.com/pagespeedonline/v5/runPagespeed",
+        "method": "GET",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            { "name": "url", "value": "={{ $json.url }}" },
+            { "name": "key", "value": "={{ $env.GOOGLE_API_KEY }}" },
+            { "name": "category", "value": "performance" },
+            { "name": "strategy", "value": "desktop" }
+          ]
+        },
+        "options": { "timeout": 60000 }
+      },
+      "id": "pagespeed-desktop",
+      "name": "PageSpeed (Desktop)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [690, 400],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "functionCode": "const mobileResult = $node['PageSpeed (Mobile)'].json;\nconst desktopResult = $node['PageSpeed (Desktop)'].json;\nconst pageInfo = $node['Define Pages'].json;\n\nfunction extractMetrics(result) {\n  const lhr = result.lighthouseResult || {};\n  const audits = lhr.audits || {};\n  \n  return {\n    performance_score: Math.round((lhr.categories?.performance?.score || 0) * 100),\n    lcp: {\n      value_ms: audits['largest-contentful-paint']?.numericValue || 0,\n      score: audits['largest-contentful-paint']?.score || 0,\n      display: audits['largest-contentful-paint']?.displayValue || 'N/A'\n    },\n    fid: {\n      value_ms: audits['max-potential-fid']?.numericValue || 0,\n      score: audits['max-potential-fid']?.score || 0,\n      display: audits['max-potential-fid']?.displayValue || 'N/A'\n    },\n    cls: {\n      value: audits['cumulative-layout-shift']?.numericValue || 0,\n      score: audits['cumulative-layout-shift']?.score || 0,\n      display: audits['cumulative-layout-shift']?.displayValue || 'N/A'\n    },\n    inp: {\n      value_ms: audits['interaction-to-next-paint']?.numericValue || 0,\n      score: audits['interaction-to-next-paint']?.score || 0,\n      display: audits['interaction-to-next-paint']?.displayValue || 'N/A'\n    },\n    ttfb: {\n      value_ms: audits['server-response-time']?.numericValue || 0,\n      display: audits['server-response-time']?.displayValue || 'N/A'\n    },\n    fcp: {\n      value_ms: audits['first-contentful-paint']?.numericValue || 0,\n      display: audits['first-contentful-paint']?.displayValue || 'N/A'\n    },\n    tbt: {\n      value_ms: audits['total-blocking-time']?.numericValue || 0,\n      display: audits['total-blocking-time']?.displayValue || 'N/A'\n    },\n    speed_index: {\n      value_ms: audits['speed-index']?.numericValue || 0,\n      display: audits['speed-index']?.displayValue || 'N/A'\n    }\n  };\n}\n\nconst mobile = extractMetrics(mobileResult);\nconst desktop = extractMetrics(desktopResult);\n\n// Determine overall status\nlet status = 'good';\nconst issues = [];\n\n// LCP thresholds: Good < 2.5s, Needs Improvement < 4s, Poor >= 4s\nif (mobile.lcp.value_ms > 4000) { status = 'poor'; issues.push(`Mobile LCP: ${mobile.lcp.display} (poor, target <2.5s)`); }\nelse if (mobile.lcp.value_ms > 2500) { if (status !== 'poor') status = 'needs_improvement'; issues.push(`Mobile LCP: ${mobile.lcp.display} (needs improvement)`); }\n\n// CLS thresholds: Good < 0.1, Needs Improvement < 0.25, Poor >= 0.25\nif (mobile.cls.value > 0.25) { status = 'poor'; issues.push(`Mobile CLS: ${mobile.cls.display} (poor, target <0.1)`); }\nelse if (mobile.cls.value > 0.1) { if (status !== 'poor') status = 'needs_improvement'; issues.push(`Mobile CLS: ${mobile.cls.display} (needs improvement)`); }\n\n// TBT (proxy for FID/INP): Good < 200ms, Poor > 600ms\nif (mobile.tbt.value_ms > 600) { status = 'poor'; issues.push(`Mobile TBT: ${mobile.tbt.display} (poor, target <200ms)`); }\nelse if (mobile.tbt.value_ms > 200) { if (status !== 'poor') status = 'needs_improvement'; issues.push(`Mobile TBT: ${mobile.tbt.display} (needs improvement)`); }\n\nreturn [{\n  json: {\n    url: pageInfo.url,\n    page_path: pageInfo.page_path,\n    mobile: mobile,\n    desktop: desktop,\n    status: status,\n    issues: issues,\n    has_issues: issues.length > 0,\n    checked_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "analyze-cwv",
+      "name": "Analyze Core Web Vitals",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE site_health_checks SET core_web_vitals = '{{ JSON.stringify({mobile: $json.mobile, desktop: $json.desktop, status: $json.status}) }}'::jsonb, mobile_friendly = {{ $json.mobile.performance_score >= 50 }} WHERE url = '{{ $json.url }}' AND checked_at = (SELECT MAX(checked_at) FROM site_health_checks WHERE url = '{{ $json.url }}'); INSERT INTO analytics_snapshots (report_type, period_start, period_end, metrics, source) VALUES ('daily', CURRENT_DATE, CURRENT_DATE, '{{ JSON.stringify($json) }}'::jsonb, 'core_web_vitals')",
+        "options": {}
+      },
+      "id": "save-cwv",
+      "name": "Save CWV Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.status }}",
+              "operation": "equal",
+              "value2": "poor"
+            }
+          ]
+        }
+      },
+      "id": "is-poor",
+      "name": "Is Poor?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1350, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#seo-alerts",
+        "text": "🐌 *Core Web Vitals - POOR*\n\n*Page:* {{ $json.url }}\n*Mobile Score:* {{ $json.mobile.performance_score }}/100\n*Desktop Score:* {{ $json.desktop.performance_score }}/100\n\n*Issues:*\n{{ $json.issues.map(i => `• ${i}`).join('\\n') }}\n\n*Key Metrics (Mobile):*\n• LCP: {{ $json.mobile.lcp.display }}\n• CLS: {{ $json.mobile.cls.display }}\n• TBT: {{ $json.mobile.tbt.display }}\n• FCP: {{ $json.mobile.fcp.display }}\n\n⚡ This page needs performance optimization!",
+        "options": {}
+      },
+      "id": "alert-poor-cwv",
+      "name": "Alert Poor CWV",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1570, 200],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 3 AM": {
+      "main": [[{ "node": "Define Pages", "type": "main", "index": 0 }]]
+    },
+    "Define Pages": {
+      "main": [[
+        { "node": "PageSpeed (Mobile)", "type": "main", "index": 0 },
+        { "node": "PageSpeed (Desktop)", "type": "main", "index": 0 }
+      ]]
+    },
+    "PageSpeed (Mobile)": {
+      "main": [[{ "node": "Analyze Core Web Vitals", "type": "main", "index": 0 }]]
+    },
+    "PageSpeed (Desktop)": {
+      "main": [[{ "node": "Analyze Core Web Vitals", "type": "main", "index": 0 }]]
+    },
+    "Analyze Core Web Vitals": {
+      "main": [[{ "node": "Save CWV Data", "type": "main", "index": 0 }]]
+    },
+    "Save CWV Data": {
+      "main": [[{ "node": "Is Poor?", "type": "main", "index": 0 }]]
+    },
+    "Is Poor?": {
+      "main": [
+        [{ "node": "Alert Poor CWV", "type": "main", "index": 0 }],
+        []
+      ]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "SEO" }, { "name": "Core Web Vitals" }, { "name": "Performance" }]
+}

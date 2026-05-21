@@ -1,0 +1,121 @@
+{
+  "name": "SEO - Content Gap Analysis",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 9 1,15 * *" }]
+        }
+      },
+      "id": "biweekly",
+      "name": "1st & 15th of Month",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT ct.keyword, ct.competitor_domain, ct.competitor_position, ct.our_position, ct.gap FROM competitor_tracking ct WHERE ct.checked_at > NOW() - INTERVAL '14 days' AND (ct.our_position IS NULL OR ct.our_position > 20) AND ct.competitor_position <= 10 ORDER BY ct.gap DESC NULLS FIRST LIMIT 100",
+        "options": {}
+      },
+      "id": "get-gaps",
+      "name": "Get Content Gaps",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT tk.keyword, kr.position, kr.search_volume FROM tracked_keywords tk JOIN keyword_rankings kr ON kr.keyword_id = tk.id WHERE kr.checked_at = (SELECT MAX(checked_at) FROM keyword_rankings WHERE keyword_id = tk.id) AND tk.is_active = true ORDER BY kr.search_volume DESC NULLS LAST",
+        "options": {}
+      },
+      "id": "get-our-keywords",
+      "name": "Get Our Keywords",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 500],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const gaps = $node['Get Content Gaps'].json;\nconst ourKeywords = $node['Get Our Keywords'].json;\n\nconst gapList = Array.isArray(gaps) ? gaps : (gaps?.keyword ? [gaps] : []);\nconst ourKwList = Array.isArray(ourKeywords) ? ourKeywords : (ourKeywords?.keyword ? [ourKeywords] : []);\nconst ourKwSet = new Set(ourKwList.map(k => k.keyword?.toLowerCase()));\n\n// Content gaps: keywords competitors rank for but we don't\nconst contentGaps = gapList.filter(g => g.keyword && !ourKwSet.has(g.keyword.toLowerCase()));\n\n// Categorize gaps\nconst categories = {};\nfor (const gap of contentGaps) {\n  const keyword = gap.keyword.toLowerCase();\n  let category = 'general';\n  \n  if (keyword.includes('how to') || keyword.includes('cara') || keyword.includes('tutorial')) category = 'how-to';\n  else if (keyword.includes('best') || keyword.includes('top') || keyword.includes('terbaik')) category = 'listicle';\n  else if (keyword.includes('vs') || keyword.includes('versus') || keyword.includes('comparison')) category = 'comparison';\n  else if (keyword.includes('review') || keyword.includes('ulasan')) category = 'review';\n  else if (keyword.includes('what is') || keyword.includes('apa itu')) category = 'definition';\n  else if (keyword.includes('price') || keyword.includes('harga') || keyword.includes('cost')) category = 'commercial';\n  \n  if (!categories[category]) categories[category] = [];\n  categories[category].push(gap);\n}\n\n// Priority scoring\nconst prioritized = contentGaps.map(gap => {\n  let priority = 0;\n  // Competitor ranks high = more valuable\n  if (gap.competitor_position <= 3) priority += 30;\n  else if (gap.competitor_position <= 5) priority += 20;\n  else if (gap.competitor_position <= 10) priority += 10;\n  \n  // We don't rank at all = bigger opportunity\n  if (!gap.our_position) priority += 20;\n  else if (gap.our_position > 50) priority += 15;\n  \n  // Multiple competitors rank = validated topic\n  priority += 10;\n  \n  return { ...gap, priority_score: priority };\n}).sort((a, b) => b.priority_score - a.priority_score);\n\nreturn [{\n  json: {\n    total_gaps: contentGaps.length,\n    categories: Object.entries(categories).map(([cat, items]) => ({ category: cat, count: items.length })),\n    top_opportunities: prioritized.slice(0, 20).map(g => ({\n      keyword: g.keyword,\n      competitor: g.competitor_domain,\n      competitor_position: g.competitor_position,\n      our_position: g.our_position || 'Not ranking',\n      priority: g.priority_score\n    })),\n    content_briefs: prioritized.slice(0, 5).map(g => ({\n      keyword: g.keyword,\n      suggested_title: generateTitle(g.keyword),\n      content_type: categorizeKeyword(g.keyword),\n      competitor_url: `https://${g.competitor_domain}`,\n      target_word_count: g.competitor_position <= 3 ? 2000 : 1500,\n      priority: 'high'\n    })),\n    analyzed_at: new Date().toISOString()\n  }\n}];\n\nfunction generateTitle(keyword) {\n  const kw = keyword.charAt(0).toUpperCase() + keyword.slice(1);\n  if (keyword.includes('how to') || keyword.includes('cara')) return kw + ' - Panduan Lengkap';\n  if (keyword.includes('best') || keyword.includes('terbaik')) return kw + ' [Updated 2025]';\n  return kw + ' - Semua yang Perlu Anda Ketahui';\n}\n\nfunction categorizeKeyword(keyword) {\n  if (keyword.includes('how') || keyword.includes('cara')) return 'guide';\n  if (keyword.includes('best') || keyword.includes('top')) return 'listicle';\n  if (keyword.includes('vs')) return 'comparison';\n  return 'article';\n}"
+      },
+      "id": "analyze-gaps",
+      "name": "Analyze Content Gaps",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO analytics_snapshots (report_type, period_start, period_end, metrics, source) VALUES ('biweekly', CURRENT_DATE - 14, CURRENT_DATE, '{{ JSON.stringify($json) }}'::jsonb, 'content_gap_analysis')",
+        "options": {}
+      },
+      "id": "save-gaps",
+      "name": "Save Analysis",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "channel": "#seo-strategy",
+        "text": "📝 *Content Gap Analysis Report*\n\n*Total Gaps Found:* {{ $json.total_gaps }} keywords\n\n*By Category:*\n{{ $json.categories.map(c => `• ${c.category}: ${c.count} keywords`).join('\\n') }}\n\n━━━━━━━━━━━━━━━━━━━━\n🎯 *Top 10 Opportunities:*\n{{ $json.top_opportunities.slice(0, 10).map((o, i) => `${i+1}. \"${o.keyword}\" — Competitor #${o.competitor_position} | Us: ${o.our_position} | Priority: ${o.priority}`).join('\\n') }}\n\n━━━━━━━━━━━━━━━━━━━━\n📋 *Suggested Content Briefs:*\n{{ $json.content_briefs.map((b, i) => `${i+1}. *${b.suggested_title}*\\n   Type: ${b.content_type} | Words: ~${b.target_word_count}`).join('\\n') }}\n\n_Create content for these topics to close the gap with competitors_",
+        "options": {}
+      },
+      "id": "report-gaps",
+      "name": "Report Gaps",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1130, 400],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "1st & 15th of Month": {
+      "main": [[
+        { "node": "Get Content Gaps", "type": "main", "index": 0 },
+        { "node": "Get Our Keywords", "type": "main", "index": 0 }
+      ]]
+    },
+    "Get Content Gaps": {
+      "main": [[{ "node": "Analyze Content Gaps", "type": "main", "index": 0 }]]
+    },
+    "Get Our Keywords": {
+      "main": [[{ "node": "Analyze Content Gaps", "type": "main", "index": 0 }]]
+    },
+    "Analyze Content Gaps": {
+      "main": [[{ "node": "Save Analysis", "type": "main", "index": 0 }]]
+    },
+    "Save Analysis": {
+      "main": [[{ "node": "Report Gaps", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "SEO" }, { "name": "Content" }, { "name": "Strategy" }]
+}

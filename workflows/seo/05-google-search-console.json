@@ -1,0 +1,167 @@
+{
+  "name": "SEO - Google Search Console Integration",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 4 * * *" }]
+        }
+      },
+      "id": "daily-4am",
+      "name": "Daily 4 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://www.googleapis.com/webmasters/v3/sites/{{ encodeURIComponent('https://' + $env.COMPANY_DOMAIN) }}/searchAnalytics/query",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "body",
+              "value": "={{ JSON.stringify({ startDate: new Date(Date.now() - 3*24*60*60*1000).toISOString().split('T')[0], endDate: new Date(Date.now() - 1*24*60*60*1000).toISOString().split('T')[0], dimensions: ['query', 'page'], rowLimit: 500, dataState: 'final' }) }}"
+            }
+          ]
+        },
+        "options": { "timeout": 60000 }
+      },
+      "id": "fetch-gsc-queries",
+      "name": "Fetch GSC Query Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [470, 200],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "google-oauth-cred",
+          "name": "Google OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://www.googleapis.com/webmasters/v3/sites/{{ encodeURIComponent('https://' + $env.COMPANY_DOMAIN) }}/searchAnalytics/query",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "oAuth2Api",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "body",
+              "value": "={{ JSON.stringify({ startDate: new Date(Date.now() - 3*24*60*60*1000).toISOString().split('T')[0], endDate: new Date(Date.now() - 1*24*60*60*1000).toISOString().split('T')[0], dimensions: ['page', 'device'], rowLimit: 200, dataState: 'final' }) }}"
+            }
+          ]
+        },
+        "options": { "timeout": 60000 }
+      },
+      "id": "fetch-gsc-pages",
+      "name": "Fetch GSC Page Data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [470, 400],
+      "credentials": {
+        "oAuth2Api": {
+          "id": "google-oauth-cred",
+          "name": "Google OAuth2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "functionCode": "const queryResponse = $node['Fetch GSC Query Data'].json;\nconst pageResponse = $node['Fetch GSC Page Data'].json;\n\nconst queryRows = queryResponse.rows || [];\nconst pageRows = pageResponse.rows || [];\n\n// Process query data\nconst queries = queryRows.map(row => ({\n  query: row.keys[0],\n  page: row.keys[1],\n  clicks: row.clicks,\n  impressions: row.impressions,\n  ctr: Math.round(row.ctr * 10000) / 100,\n  position: Math.round(row.position * 10) / 10\n}));\n\n// Top queries by impressions\nconst topQueries = [...queries].sort((a, b) => b.impressions - a.impressions).slice(0, 50);\n\n// Quick wins: high impressions, low CTR, position 4-20\nconst quickWins = queries.filter(q => \n  q.impressions > 50 && q.ctr < 3 && q.position >= 4 && q.position <= 20\n).sort((a, b) => b.impressions - a.impressions).slice(0, 20);\n\n// Rising queries: position improving (would need historical data)\nconst highPotential = queries.filter(q =>\n  q.position <= 10 && q.ctr < 5 && q.impressions > 100\n).slice(0, 10);\n\n// Page performance\nconst pagePerformance = {};\nfor (const row of pageRows) {\n  const page = row.keys[0];\n  if (!pagePerformance[page]) {\n    pagePerformance[page] = { page, clicks: 0, impressions: 0, devices: {} };\n  }\n  pagePerformance[page].clicks += row.clicks;\n  pagePerformance[page].impressions += row.impressions;\n  pagePerformance[page].devices[row.keys[1]] = {\n    clicks: row.clicks,\n    impressions: row.impressions,\n    ctr: Math.round(row.ctr * 10000) / 100,\n    position: Math.round(row.position * 10) / 10\n  };\n}\n\nconst topPages = Object.values(pagePerformance)\n  .sort((a, b) => b.clicks - a.clicks)\n  .slice(0, 20);\n\nreturn [{\n  json: {\n    date: new Date(Date.now() - 2*24*60*60*1000).toISOString().split('T')[0],\n    summary: {\n      total_queries: queries.length,\n      total_clicks: queries.reduce((s, q) => s + q.clicks, 0),\n      total_impressions: queries.reduce((s, q) => s + q.impressions, 0),\n      avg_ctr: queries.length > 0 ? Math.round(queries.reduce((s, q) => s + q.ctr, 0) / queries.length * 100) / 100 : 0,\n      avg_position: queries.length > 0 ? Math.round(queries.reduce((s, q) => s + q.position, 0) / queries.length * 10) / 10 : 0\n    },\n    top_queries: topQueries.slice(0, 20),\n    quick_wins: quickWins,\n    high_potential: highPotential,\n    top_pages: topPages\n  }\n}];"
+      },
+      "id": "process-gsc-data",
+      "name": "Process GSC Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO analytics_snapshots (report_type, period_start, period_end, metrics, dimensions, source) VALUES ('daily', '{{ $json.date }}', '{{ $json.date }}', '{{ JSON.stringify({summary: $json.summary, top_queries: $json.top_queries.slice(0,10)}) }}'::jsonb, '{{ JSON.stringify({quick_wins: $json.quick_wins.slice(0,5), top_pages: $json.top_pages.slice(0,5)}) }}'::jsonb, 'search_console')",
+        "options": {}
+      },
+      "id": "save-gsc-data",
+      "name": "Save GSC Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.quick_wins.length }}",
+              "operation": "larger",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "id": "has-quick-wins",
+      "name": "Has Quick Wins?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1130, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#seo-strategy",
+        "text": "🔍 *GSC Daily Insights*\n📅 {{ $json.date }}\n\n*Summary:*\n• Clicks: {{ $json.summary.total_clicks.toLocaleString() }}\n• Impressions: {{ $json.summary.total_impressions.toLocaleString() }}\n• Avg CTR: {{ $json.summary.avg_ctr }}%\n• Avg Position: {{ $json.summary.avg_position }}\n\n💡 *Quick Wins (High Impressions, Low CTR):*\n{{ $json.quick_wins.slice(0, 5).map((q, i) => `${i+1}. \"${q.query}\" — Pos: ${q.position} | Impr: ${q.impressions} | CTR: ${q.ctr}%\\n   Page: ${q.page}`).join('\\n') }}\n\n_Optimize title/meta for these queries to boost CTR_",
+        "options": {}
+      },
+      "id": "notify-quick-wins",
+      "name": "Notify Quick Wins",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1350, 250],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily 4 AM": {
+      "main": [[
+        { "node": "Fetch GSC Query Data", "type": "main", "index": 0 },
+        { "node": "Fetch GSC Page Data", "type": "main", "index": 0 }
+      ]]
+    },
+    "Fetch GSC Query Data": {
+      "main": [[{ "node": "Process GSC Data", "type": "main", "index": 0 }]]
+    },
+    "Fetch GSC Page Data": {
+      "main": [[{ "node": "Process GSC Data", "type": "main", "index": 0 }]]
+    },
+    "Process GSC Data": {
+      "main": [[{ "node": "Save GSC Data", "type": "main", "index": 0 }]]
+    },
+    "Save GSC Data": {
+      "main": [[{ "node": "Has Quick Wins?", "type": "main", "index": 0 }]]
+    },
+    "Has Quick Wins?": {
+      "main": [
+        [{ "node": "Notify Quick Wins", "type": "main", "index": 0 }],
+        []
+      ]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "SEO" }, { "name": "Search Console" }, { "name": "Daily" }]
+}

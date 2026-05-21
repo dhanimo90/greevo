@@ -1,0 +1,148 @@
+{
+  "name": "SEO - Meta Tag & Title Optimizer",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "seo/analyze-meta",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-analyze",
+      "name": "Webhook - Analyze Meta",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 4 * * 5" }]
+        }
+      },
+      "id": "weekly-friday",
+      "name": "Weekly Friday 4 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 500]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT kr.url_ranked as url FROM keyword_rankings kr WHERE kr.url_ranked IS NOT NULL AND kr.checked_at > NOW() - INTERVAL '7 days' AND kr.position > 5 AND kr.position <= 20 ORDER BY kr.position ASC LIMIT 20",
+        "options": {}
+      },
+      "id": "get-pages-to-optimize",
+      "name": "Get Pages to Optimize",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 500],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-cred",
+          "name": "GreeVo PostgreSQL"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url || $json.body?.url }}",
+        "method": "GET",
+        "options": {
+          "timeout": 15000,
+          "redirect": { "redirect": { "followRedirects": true } }
+        }
+      },
+      "id": "fetch-page",
+      "name": "Fetch Page",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [690, 400],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "functionCode": "const response = $input.first().json;\nconst html = response.body || response.data || '';\nconst htmlStr = typeof html === 'string' ? html : JSON.stringify(html);\nconst url = $node['Fetch Page'].json.url || $node['Webhook - Analyze Meta'].json.body?.url || '';\n\n// Extract meta tags\nconst titleMatch = htmlStr.match(/<title[^>]*>([^<]*)<\\/title>/i);\nconst descMatch = htmlStr.match(/<meta[^>]*name=[\"']description[\"'][^>]*content=[\"']([^\"']*)[\"']/i) ||\n                  htmlStr.match(/<meta[^>]*content=[\"']([^\"']*)[\"'][^>]*name=[\"']description[\"']/i);\nconst h1Match = htmlStr.match(/<h1[^>]*>([^<]*)<\\/h1>/i);\nconst canonicalMatch = htmlStr.match(/<link[^>]*rel=[\"']canonical[\"'][^>]*href=[\"']([^\"']*)[\"']/i);\nconst ogTitleMatch = htmlStr.match(/<meta[^>]*property=[\"']og:title[\"'][^>]*content=[\"']([^\"']*)[\"']/i);\nconst ogDescMatch = htmlStr.match(/<meta[^>]*property=[\"']og:description[\"'][^>]*content=[\"']([^\"']*)[\"']/i);\n\nconst title = titleMatch ? titleMatch[1].trim() : '';\nconst description = descMatch ? descMatch[1].trim() : '';\nconst h1 = h1Match ? h1Match[1].trim() : '';\nconst canonical = canonicalMatch ? canonicalMatch[1].trim() : '';\nconst ogTitle = ogTitleMatch ? ogTitleMatch[1].trim() : '';\nconst ogDesc = ogDescMatch ? ogDescMatch[1].trim() : '';\n\n// Analyze issues\nconst issues = [];\nconst suggestions = [];\n\n// Title analysis\nif (!title) {\n  issues.push({ field: 'title', severity: 'critical', message: 'Missing title tag' });\n} else {\n  if (title.length < 30) issues.push({ field: 'title', severity: 'warning', message: `Title too short (${title.length} chars, recommend 50-60)` });\n  if (title.length > 60) issues.push({ field: 'title', severity: 'warning', message: `Title too long (${title.length} chars, may be truncated)` });\n}\n\n// Description analysis\nif (!description) {\n  issues.push({ field: 'description', severity: 'high', message: 'Missing meta description' });\n  suggestions.push({ field: 'description', suggestion: `Write a compelling 150-160 char description for: ${url}` });\n} else {\n  if (description.length < 120) issues.push({ field: 'description', severity: 'warning', message: `Description too short (${description.length} chars, recommend 150-160)` });\n  if (description.length > 160) issues.push({ field: 'description', severity: 'info', message: `Description may be truncated (${description.length} chars)` });\n}\n\n// H1 analysis\nif (!h1) {\n  issues.push({ field: 'h1', severity: 'high', message: 'Missing H1 tag' });\n} else if (h1 === title) {\n  issues.push({ field: 'h1', severity: 'info', message: 'H1 identical to title (consider differentiating)' });\n}\n\n// Canonical\nif (!canonical) {\n  issues.push({ field: 'canonical', severity: 'medium', message: 'Missing canonical tag' });\n}\n\n// Open Graph\nif (!ogTitle) issues.push({ field: 'og:title', severity: 'low', message: 'Missing og:title' });\nif (!ogDesc) issues.push({ field: 'og:description', severity: 'low', message: 'Missing og:description' });\n\n// Schema markup check\nconst hasSchema = htmlStr.includes('application/ld+json') || htmlStr.includes('itemtype');\nif (!hasSchema) {\n  issues.push({ field: 'schema', severity: 'medium', message: 'No structured data (schema.org) detected' });\n  suggestions.push({ field: 'schema', suggestion: 'Add JSON-LD structured data for better SERP appearance' });\n}\n\n// Score\nlet score = 100;\nfor (const issue of issues) {\n  if (issue.severity === 'critical') score -= 25;\n  else if (issue.severity === 'high') score -= 15;\n  else if (issue.severity === 'medium') score -= 10;\n  else if (issue.severity === 'warning') score -= 5;\n  else score -= 2;\n}\n\nreturn [{\n  json: {\n    url: url,\n    score: Math.max(0, score),\n    current: { title, description, h1, canonical, og_title: ogTitle, og_description: ogDesc, has_schema: hasSchema },\n    title_length: title.length,\n    description_length: description.length,\n    issues: issues,\n    suggestions: suggestions,\n    issue_count: issues.length,\n    needs_attention: score < 70\n  }\n}];"
+      },
+      "id": "analyze-meta",
+      "name": "Analyze Meta Tags",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 400]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.needs_attention }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "needs-attention",
+      "name": "Needs Attention?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1130, 400]
+    },
+    {
+      "parameters": {
+        "channel": "#seo-strategy",
+        "text": "📝 *Meta Tag Optimization Needed*\n\n*URL:* {{ $json.url }}\n*Score:* {{ $json.score }}/100\n\n*Current:*\n• Title ({{ $json.title_length }} chars): {{ $json.current.title || 'MISSING' }}\n• Description ({{ $json.description_length }} chars): {{ $json.current.description?.substring(0, 80) || 'MISSING' }}...\n• H1: {{ $json.current.h1 || 'MISSING' }}\n• Schema: {{ $json.current.has_schema ? '✅' : '❌' }}\n\n*Issues ({{ $json.issue_count }}):*\n{{ $json.issues.map(i => `• [${i.severity.toUpperCase()}] ${i.field}: ${i.message}`).join('\\n') }}\n\n{{ $json.suggestions.length > 0 ? '*Suggestions:*\\n' + $json.suggestions.map(s => `💡 ${s.suggestion}`).join('\\n') : '' }}",
+        "options": {}
+      },
+      "id": "notify-meta-issues",
+      "name": "Notify Meta Issues",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1350, 300],
+      "credentials": {
+        "slackApi": {
+          "id": "slack-cred",
+          "name": "Slack Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}"
+      },
+      "id": "response-analysis",
+      "name": "Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1350, 500]
+    }
+  ],
+  "connections": {
+    "Webhook - Analyze Meta": {
+      "main": [[{ "node": "Fetch Page", "type": "main", "index": 0 }]]
+    },
+    "Weekly Friday 4 AM": {
+      "main": [[{ "node": "Get Pages to Optimize", "type": "main", "index": 0 }]]
+    },
+    "Get Pages to Optimize": {
+      "main": [[{ "node": "Fetch Page", "type": "main", "index": 0 }]]
+    },
+    "Fetch Page": {
+      "main": [[{ "node": "Analyze Meta Tags", "type": "main", "index": 0 }]]
+    },
+    "Analyze Meta Tags": {
+      "main": [[{ "node": "Needs Attention?", "type": "main", "index": 0 }]]
+    },
+    "Needs Attention?": {
+      "main": [
+        [{ "node": "Notify Meta Issues", "type": "main", "index": 0 }],
+        [{ "node": "Response", "type": "main", "index": 0 }]
+      ]
+    },
+    "Notify Meta Issues": {
+      "main": [[{ "node": "Response", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "SEO" }, { "name": "Meta Tags" }, { "name": "On-Page" }]
+}
