@@ -1,0 +1,74 @@
+{
+  "name": "Analytics - Attribution Modeling",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 6 1 * *" }]
+        }
+      },
+      "id": "monthly-1st",
+      "name": "Monthly 1st 6 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT d.id as deal_id, d.deal_value, d.stage, d.contact_id, c.source as first_touch_source, c.created_at as contact_created, d.created_at as deal_created, d.updated_at as deal_closed, (SELECT json_agg(json_build_object('type', la.activity_type, 'data', la.activity_data, 'at', la.created_at) ORDER BY la.created_at) FROM lead_activities la WHERE la.contact_id = d.contact_id) as touchpoints FROM deals d JOIN contacts c ON c.id = d.contact_id WHERE d.stage = 'closed_won' AND d.updated_at > NOW() - INTERVAL '30 days'",
+        "options": {}
+      },
+      "id": "get-conversions",
+      "name": "Get Conversions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "functionCode": "const deals = $input.all().map(i => i.json);\nif (!deals.length || !deals[0].deal_id) return [{ json: { no_data: true } }];\n\nconst firstTouch = {}; // Source gets 100% credit\nconst lastTouch = {};  // Last touchpoint gets 100%\nconst linear = {};     // Equal credit across all touchpoints\nconst timeDecay = {};  // More recent = more credit\n\nlet totalRevenue = 0;\n\nfor (const deal of deals) {\n  const value = parseFloat(deal.deal_value) || 0;\n  totalRevenue += value;\n  const touchpoints = deal.touchpoints || [];\n  \n  if (touchpoints.length === 0) continue;\n\n  // First Touch\n  const firstSource = deal.first_touch_source || 'direct';\n  firstTouch[firstSource] = (firstTouch[firstSource] || 0) + value;\n\n  // Last Touch\n  const lastTp = touchpoints[touchpoints.length - 1];\n  const lastSource = lastTp?.data?.source || lastTp?.type || 'unknown';\n  lastTouch[lastSource] = (lastTouch[lastSource] || 0) + value;\n\n  // Linear\n  const creditPerTouch = value / touchpoints.length;\n  for (const tp of touchpoints) {\n    const source = tp.data?.source || tp.type || 'unknown';\n    linear[source] = (linear[source] || 0) + creditPerTouch;\n  }\n\n  // Time Decay (half-life = 7 days)\n  const dealClosed = new Date(deal.deal_closed).getTime();\n  let totalWeight = 0;\n  const weights = touchpoints.map(tp => {\n    const tpTime = new Date(tp.at).getTime();\n    const daysBeforeClose = (dealClosed - tpTime) / (1000 * 60 * 60 * 24);\n    const weight = Math.pow(0.5, daysBeforeClose / 7);\n    totalWeight += weight;\n    return { tp, weight };\n  });\n  \n  for (const { tp, weight } of weights) {\n    const source = tp.data?.source || tp.type || 'unknown';\n    const credit = (weight / totalWeight) * value;\n    timeDecay[source] = (timeDecay[source] || 0) + credit;\n  }\n}\n\n// Format results\nconst formatModel = (model) => Object.entries(model)\n  .map(([source, value]) => ({ source, revenue: Math.round(value), percent: Math.round(value / totalRevenue * 100) }))\n  .sort((a, b) => b.revenue - a.revenue)\n  .slice(0, 10);\n\nreturn [{\n  json: {\n    period: new Date(Date.now() - 30*24*60*60*1000).toLocaleString('id-ID', { month: 'long', year: 'numeric' }),\n    total_conversions: deals.length,\n    total_revenue: totalRevenue,\n    models: {\n      first_touch: formatModel(firstTouch),\n      last_touch: formatModel(lastTouch),\n      linear: formatModel(linear),\n      time_decay: formatModel(timeDecay)\n    },\n    recommended_model: 'time_decay',\n    generated_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "calculate-attribution",
+      "name": "Calculate Attribution",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO analytics_snapshots (report_type, period_start, period_end, metrics, source) VALUES ('monthly', (NOW() - INTERVAL '30 days')::date, NOW()::date, '{{ JSON.stringify($json) }}'::jsonb, 'attribution_model')",
+        "options": {}
+      },
+      "id": "save-attribution",
+      "name": "Save Attribution",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "channel": "#marketing-reports",
+        "text": "📊 *Monthly Attribution Report*\n📅 {{ $json.period }}\n\n*Conversions:* {{ $json.total_conversions }} deals\n*Revenue:* Rp {{ Number($json.total_revenue).toLocaleString('id-ID') }}\n\n━━━ *First Touch Attribution* ━━━\n{{ $json.models.first_touch.slice(0,5).map(m => `• ${m.source}: Rp ${Number(m.revenue).toLocaleString('id-ID')} (${m.percent}%)`).join('\\n') }}\n\n━━━ *Time Decay Attribution* (Recommended) ━━━\n{{ $json.models.time_decay.slice(0,5).map(m => `• ${m.source}: Rp ${Number(m.revenue).toLocaleString('id-ID')} (${m.percent}%)`).join('\\n') }}\n\n_Time decay model gives more credit to recent touchpoints_",
+        "options": {}
+      },
+      "id": "report-attribution",
+      "name": "Report Attribution",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1130, 300],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack Bot" } }
+    }
+  ],
+  "connections": {
+    "Monthly 1st 6 AM": { "main": [[{ "node": "Get Conversions", "type": "main", "index": 0 }]] },
+    "Get Conversions": { "main": [[{ "node": "Calculate Attribution", "type": "main", "index": 0 }]] },
+    "Calculate Attribution": { "main": [[{ "node": "Save Attribution", "type": "main", "index": 0 }]] },
+    "Save Attribution": { "main": [[{ "node": "Report Attribution", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Analytics" }, { "name": "Attribution" }, { "name": "Monthly" }]
+}

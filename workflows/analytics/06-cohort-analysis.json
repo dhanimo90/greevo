@@ -1,0 +1,74 @@
+{
+  "name": "Analytics - Cohort Analysis & LTV",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 5 1 * *" }]
+        }
+      },
+      "id": "monthly-1st",
+      "name": "Monthly 1st 5 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DATE_TRUNC('month', c.created_at)::date as cohort_month, COUNT(DISTINCT c.id) as cohort_size, COUNT(DISTINCT c.id) FILTER (WHERE c.lead_status = 'customer') as converted, COUNT(DISTINCT c.id) FILTER (WHERE EXISTS(SELECT 1 FROM lead_activities la WHERE la.contact_id = c.id AND la.created_at > c.created_at + INTERVAL '30 days')) as retained_30d, COUNT(DISTINCT c.id) FILTER (WHERE EXISTS(SELECT 1 FROM lead_activities la WHERE la.contact_id = c.id AND la.created_at > c.created_at + INTERVAL '60 days')) as retained_60d, COUNT(DISTINCT c.id) FILTER (WHERE EXISTS(SELECT 1 FROM lead_activities la WHERE la.contact_id = c.id AND la.created_at > c.created_at + INTERVAL '90 days')) as retained_90d, COALESCE(SUM(d.deal_value) FILTER (WHERE d.stage = 'closed_won'), 0) as total_revenue, ROUND(COALESCE(SUM(d.deal_value) FILTER (WHERE d.stage = 'closed_won'), 0) / NULLIF(COUNT(DISTINCT c.id) FILTER (WHERE c.lead_status = 'customer'), 0)) as avg_ltv FROM contacts c LEFT JOIN deals d ON d.contact_id = c.id WHERE c.created_at > NOW() - INTERVAL '12 months' GROUP BY DATE_TRUNC('month', c.created_at) ORDER BY cohort_month DESC",
+        "options": {}
+      },
+      "id": "get-cohort-data",
+      "name": "Get Cohort Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "functionCode": "const cohorts = $input.all().map(i => i.json);\nif (!cohorts.length || !cohorts[0].cohort_month) return [{ json: { no_data: true } }];\n\nconst cohortAnalysis = cohorts.map(c => {\n  const size = parseInt(c.cohort_size) || 1;\n  return {\n    month: c.cohort_month,\n    size: size,\n    converted: parseInt(c.converted) || 0,\n    conversion_rate: Math.round((parseInt(c.converted) || 0) / size * 100),\n    retention: {\n      day_30: Math.round((parseInt(c.retained_30d) || 0) / size * 100),\n      day_60: Math.round((parseInt(c.retained_60d) || 0) / size * 100),\n      day_90: Math.round((parseInt(c.retained_90d) || 0) / size * 100)\n    },\n    revenue: parseFloat(c.total_revenue) || 0,\n    avg_ltv: parseFloat(c.avg_ltv) || 0\n  };\n});\n\n// Overall metrics\nconst totalLeads = cohortAnalysis.reduce((s, c) => s + c.size, 0);\nconst totalConverted = cohortAnalysis.reduce((s, c) => s + c.converted, 0);\nconst totalRevenue = cohortAnalysis.reduce((s, c) => s + c.revenue, 0);\nconst avgConversionRate = Math.round(totalConverted / totalLeads * 100);\nconst avgLTV = totalConverted > 0 ? Math.round(totalRevenue / totalConverted) : 0;\n\n// Retention trend\nconst avgRetention30 = Math.round(cohortAnalysis.reduce((s, c) => s + c.retention.day_30, 0) / cohortAnalysis.length);\nconst avgRetention60 = Math.round(cohortAnalysis.reduce((s, c) => s + c.retention.day_60, 0) / cohortAnalysis.length);\nconst avgRetention90 = Math.round(cohortAnalysis.reduce((s, c) => s + c.retention.day_90, 0) / cohortAnalysis.length);\n\nreturn [{\n  json: {\n    period: '12 months',\n    summary: {\n      total_leads: totalLeads,\n      total_converted: totalConverted,\n      avg_conversion_rate: avgConversionRate,\n      total_revenue: totalRevenue,\n      avg_ltv: avgLTV,\n      avg_retention_30d: avgRetention30,\n      avg_retention_60d: avgRetention60,\n      avg_retention_90d: avgRetention90\n    },\n    cohorts: cohortAnalysis,\n    generated_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "analyze-cohorts",
+      "name": "Analyze Cohorts",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO analytics_snapshots (report_type, period_start, period_end, metrics, source) VALUES ('monthly', (NOW() - INTERVAL '12 months')::date, NOW()::date, '{{ JSON.stringify($json) }}'::jsonb, 'cohort_analysis')",
+        "options": {}
+      },
+      "id": "save-cohorts",
+      "name": "Save Cohort Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "channel": "#executive-dashboard",
+        "text": "📈 *Monthly Cohort Analysis & LTV Report*\n\n*Overall (12 months):*\n• Total Leads: {{ $json.summary.total_leads.toLocaleString() }}\n• Converted: {{ $json.summary.total_converted }} ({{ $json.summary.avg_conversion_rate }}%)\n• Total Revenue: Rp {{ Number($json.summary.total_revenue).toLocaleString('id-ID') }}\n• Avg LTV: Rp {{ Number($json.summary.avg_ltv).toLocaleString('id-ID') }}\n\n*Retention:*\n• 30-day: {{ $json.summary.avg_retention_30d }}%\n• 60-day: {{ $json.summary.avg_retention_60d }}%\n• 90-day: {{ $json.summary.avg_retention_90d }}%\n\n*Recent Cohorts:*\n{{ $json.cohorts.slice(0, 6).map(c => `• ${c.month}: ${c.size} leads → ${c.converted} customers (${c.conversion_rate}%) | LTV: Rp ${Number(c.avg_ltv).toLocaleString('id-ID')}`).join('\\n') }}",
+        "options": {}
+      },
+      "id": "report-cohorts",
+      "name": "Report Cohorts",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1130, 300],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack Bot" } }
+    }
+  ],
+  "connections": {
+    "Monthly 1st 5 AM": { "main": [[{ "node": "Get Cohort Data", "type": "main", "index": 0 }]] },
+    "Get Cohort Data": { "main": [[{ "node": "Analyze Cohorts", "type": "main", "index": 0 }]] },
+    "Analyze Cohorts": { "main": [[{ "node": "Save Cohort Data", "type": "main", "index": 0 }]] },
+    "Save Cohort Data": { "main": [[{ "node": "Report Cohorts", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Analytics" }, { "name": "Cohort" }, { "name": "LTV" }]
+}

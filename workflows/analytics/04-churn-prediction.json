@@ -1,0 +1,74 @@
+{
+  "name": "Analytics - Churn Prediction & Prevention",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 6 * * 1" }]
+        }
+      },
+      "id": "weekly-monday",
+      "name": "Monday 6 AM",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT c.id, c.email, c.first_name, c.last_name, c.company, c.client_id, c.lead_score, c.created_at, d.deal_value, d.assigned_to, (SELECT MAX(la.created_at) FROM lead_activities la WHERE la.contact_id = c.id) as last_activity, (SELECT COUNT(*) FROM lead_activities la WHERE la.contact_id = c.id AND la.created_at > NOW() - INTERVAL '30 days') as activities_30d, (SELECT COUNT(*) FROM lead_activities la WHERE la.contact_id = c.id AND la.created_at BETWEEN NOW() - INTERVAL '60 days' AND NOW() - INTERVAL '30 days') as activities_prev_30d, (SELECT COUNT(*) FROM lead_activities la WHERE la.contact_id = c.id AND la.activity_type = 'email_opened' AND la.created_at > NOW() - INTERVAL '30 days') as opens_30d, (SELECT COUNT(*) FROM lead_activities la WHERE la.contact_id = c.id AND la.activity_type = 'email_opened' AND la.created_at BETWEEN NOW() - INTERVAL '60 days' AND NOW() - INTERVAL '30 days') as opens_prev_30d FROM contacts c LEFT JOIN deals d ON d.contact_id = c.id AND d.stage = 'closed_won' WHERE c.lead_status = 'customer' ORDER BY c.id",
+        "options": {}
+      },
+      "id": "get-customers",
+      "name": "Get Customer Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "functionCode": "const customers = $input.all().map(i => i.json);\nif (!customers.length || !customers[0].id) return [{ json: { no_data: true } }];\n\nconst atRisk = [];\nconst healthy = [];\n\nfor (const c of customers) {\n  const activities30d = parseInt(c.activities_30d) || 0;\n  const activitiesPrev30d = parseInt(c.activities_prev_30d) || 0;\n  const opens30d = parseInt(c.opens_30d) || 0;\n  const opensPrev30d = parseInt(c.opens_prev_30d) || 0;\n  const lastActivity = c.last_activity ? new Date(c.last_activity) : null;\n  const daysSinceActivity = lastActivity ? (Date.now() - lastActivity.getTime()) / (1000*60*60*24) : 999;\n\n  // Churn risk scoring\n  let churnRisk = 0;\n  const signals = [];\n\n  // Activity decline\n  if (activitiesPrev30d > 0 && activities30d < activitiesPrev30d * 0.5) {\n    churnRisk += 25;\n    signals.push(`Activity dropped ${Math.round((1 - activities30d/activitiesPrev30d) * 100)}%`);\n  }\n\n  // Email engagement decline\n  if (opensPrev30d > 0 && opens30d < opensPrev30d * 0.5) {\n    churnRisk += 20;\n    signals.push('Email engagement declining');\n  }\n\n  // Inactivity\n  if (daysSinceActivity > 30) {\n    churnRisk += 20;\n    signals.push(`No activity for ${Math.round(daysSinceActivity)} days`);\n  } else if (daysSinceActivity > 14) {\n    churnRisk += 10;\n    signals.push(`Low activity (${Math.round(daysSinceActivity)} days since last)`);\n  }\n\n  // Zero engagement this month\n  if (activities30d === 0) {\n    churnRisk += 25;\n    signals.push('Zero engagement this month');\n  }\n\n  // No email opens\n  if (opens30d === 0 && opensPrev30d > 0) {\n    churnRisk += 10;\n    signals.push('Stopped opening emails');\n  }\n\n  const riskLevel = churnRisk >= 60 ? 'high' : churnRisk >= 30 ? 'medium' : 'low';\n\n  if (churnRisk >= 30) {\n    atRisk.push({\n      contact_id: c.id,\n      email: c.email,\n      name: `${c.first_name} ${c.last_name}`,\n      company: c.company,\n      deal_value: parseFloat(c.deal_value) || 0,\n      assigned_to: c.assigned_to,\n      churn_risk: churnRisk,\n      risk_level: riskLevel,\n      signals: signals,\n      days_since_activity: Math.round(daysSinceActivity),\n      recommended_action: churnRisk >= 60 ? 'Immediate outreach - schedule call' :\n                          churnRisk >= 40 ? 'Send personalized check-in email' :\n                          'Monitor closely, send value content'\n    });\n  } else {\n    healthy.push(c.id);\n  }\n}\n\nconst totalAtRisk = atRisk.reduce((s, c) => s + c.deal_value, 0);\n\nreturn [{\n  json: {\n    summary: {\n      total_customers: customers.length,\n      at_risk: atRisk.length,\n      healthy: healthy.length,\n      high_risk: atRisk.filter(c => c.risk_level === 'high').length,\n      medium_risk: atRisk.filter(c => c.risk_level === 'medium').length,\n      revenue_at_risk: totalAtRisk\n    },\n    at_risk_customers: atRisk.sort((a, b) => b.churn_risk - a.churn_risk).slice(0, 20),\n    generated_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "predict-churn",
+      "name": "Predict Churn",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO analytics_snapshots (report_type, period_start, period_end, metrics, source) VALUES ('weekly', CURRENT_DATE, CURRENT_DATE, '{{ JSON.stringify($json) }}'::jsonb, 'churn_prediction')",
+        "options": {}
+      },
+      "id": "save-churn",
+      "name": "Save Predictions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [910, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "channel": "#customer-success",
+        "text": "⚠️ *Weekly Churn Risk Report*\n\n*Summary:*\n• Total Customers: {{ $json.summary.total_customers }}\n• At Risk: {{ $json.summary.at_risk }} ({{ $json.summary.high_risk }} high, {{ $json.summary.medium_risk }} medium)\n• Revenue at Risk: Rp {{ Number($json.summary.revenue_at_risk).toLocaleString('id-ID') }}\n\n🚨 *High Risk Customers:*\n{{ $json.at_risk_customers.filter(c => c.risk_level === 'high').slice(0, 5).map((c, i) => `${i+1}. *${c.name}* (${c.company}) — Risk: ${c.churn_risk}%\\n   Value: Rp ${Number(c.deal_value).toLocaleString('id-ID')}\\n   Signals: ${c.signals.join(', ')}\\n   Action: ${c.recommended_action}`).join('\\n\\n') || 'None' }}\n\n⚠️ *Medium Risk:*\n{{ $json.at_risk_customers.filter(c => c.risk_level === 'medium').slice(0, 5).map((c, i) => `${i+1}. ${c.name} (${c.company}) — Risk: ${c.churn_risk}% | ${c.signals[0]}`).join('\\n') || 'None' }}",
+        "options": {}
+      },
+      "id": "report-churn",
+      "name": "Report Churn Risk",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1130, 300],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack Bot" } }
+    }
+  ],
+  "connections": {
+    "Monday 6 AM": { "main": [[{ "node": "Get Customer Data", "type": "main", "index": 0 }]] },
+    "Get Customer Data": { "main": [[{ "node": "Predict Churn", "type": "main", "index": 0 }]] },
+    "Predict Churn": { "main": [[{ "node": "Save Predictions", "type": "main", "index": 0 }]] },
+    "Save Predictions": { "main": [[{ "node": "Report Churn Risk", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Analytics" }, { "name": "Churn" }, { "name": "Customer Success" }]
+}

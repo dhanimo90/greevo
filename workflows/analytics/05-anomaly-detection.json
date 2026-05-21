@@ -1,0 +1,73 @@
+{
+  "name": "Analytics - Anomaly Detection",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "cronExpression", "expression": "0 */4 * * *" }]
+        }
+      },
+      "id": "every-4h",
+      "name": "Every 4 Hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT 'new_contacts' as metric, COUNT(*) as current_value, (SELECT COUNT(*) FROM contacts WHERE created_at BETWEEN NOW() - INTERVAL '48 hours' AND NOW() - INTERVAL '24 hours') as previous_value, (SELECT ROUND(AVG(daily_count)) FROM (SELECT COUNT(*) as daily_count FROM contacts WHERE created_at > NOW() - INTERVAL '30 days' GROUP BY DATE(created_at)) sub) as avg_30d FROM contacts WHERE created_at > NOW() - INTERVAL '24 hours' UNION ALL SELECT 'workflow_errors' as metric, COUNT(*) as current_value, (SELECT COUNT(*) FROM workflow_execution_stats WHERE status = 'error' AND started_at BETWEEN NOW() - INTERVAL '8 hours' AND NOW() - INTERVAL '4 hours') as previous_value, (SELECT ROUND(AVG(cnt)) FROM (SELECT COUNT(*) as cnt FROM workflow_execution_stats WHERE status = 'error' AND started_at > NOW() - INTERVAL '7 days' GROUP BY DATE(started_at)) sub) as avg_30d FROM workflow_execution_stats WHERE status = 'error' AND started_at > NOW() - INTERVAL '4 hours' UNION ALL SELECT 'email_bounces' as metric, COUNT(*) as current_value, 0 as previous_value, (SELECT ROUND(AVG(cnt)) FROM (SELECT COUNT(*) as cnt FROM lead_activities WHERE activity_type = 'email_bounced' AND created_at > NOW() - INTERVAL '30 days' GROUP BY DATE(created_at)) sub) as avg_30d FROM lead_activities WHERE activity_type = 'email_bounced' AND created_at > NOW() - INTERVAL '24 hours'",
+        "options": {}
+      },
+      "id": "get-metrics",
+      "name": "Get Current Metrics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "functionCode": "const metrics = $input.all().map(i => i.json);\nconst anomalies = [];\n\nfor (const m of metrics) {\n  if (!m.metric) continue;\n  \n  const current = parseInt(m.current_value) || 0;\n  const avg = parseInt(m.avg_30d) || 1;\n  const previous = parseInt(m.previous_value) || 0;\n  \n  // Z-score simplified: how many standard deviations from mean\n  // Using 2x average as threshold for anomaly\n  const ratio = current / Math.max(1, avg);\n  const changeFromPrevious = previous > 0 ? ((current - previous) / previous * 100) : 0;\n  \n  let isAnomaly = false;\n  let severity = 'info';\n  let direction = 'normal';\n  \n  if (ratio >= 3) {\n    isAnomaly = true;\n    severity = 'critical';\n    direction = 'spike';\n  } else if (ratio >= 2) {\n    isAnomaly = true;\n    severity = 'warning';\n    direction = 'high';\n  } else if (ratio <= 0.2 && avg > 5) {\n    isAnomaly = true;\n    severity = 'warning';\n    direction = 'drop';\n  }\n\n  if (isAnomaly) {\n    anomalies.push({\n      metric: m.metric,\n      current_value: current,\n      average_value: avg,\n      ratio: Math.round(ratio * 100) / 100,\n      change_percent: Math.round(changeFromPrevious),\n      severity: severity,\n      direction: direction,\n      message: `${m.metric.replace(/_/g, ' ')}: ${current} (avg: ${avg}, ${ratio.toFixed(1)}x normal)`\n    });\n  }\n}\n\nreturn [{\n  json: {\n    has_anomalies: anomalies.length > 0,\n    anomaly_count: anomalies.length,\n    anomalies: anomalies,\n    checked_at: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "detect-anomalies",
+      "name": "Detect Anomalies",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{ "value1": "={{ $json.has_anomalies }}", "value2": true }]
+        }
+      },
+      "id": "has-anomalies",
+      "name": "Has Anomalies?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "channel": "#system-alerts",
+        "text": "🔔 *Anomaly Detected*\n\n{{ $json.anomalies.map(a => `${a.severity === 'critical' ? '🚨' : '⚠️'} *${a.metric.replace(/_/g, ' ').toUpperCase()}*\\n• Current: ${a.current_value} | Average: ${a.average_value} | Ratio: ${a.ratio}x\\n• Direction: ${a.direction} | Change: ${a.change_percent > 0 ? '+' : ''}${a.change_percent}%`).join('\\n\\n') }}\n\n_Investigate unusual patterns immediately_",
+        "options": {}
+      },
+      "id": "alert-anomaly",
+      "name": "Alert Anomaly",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1130, 250],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack Bot" } }
+    }
+  ],
+  "connections": {
+    "Every 4 Hours": { "main": [[{ "node": "Get Current Metrics", "type": "main", "index": 0 }]] },
+    "Get Current Metrics": { "main": [[{ "node": "Detect Anomalies", "type": "main", "index": 0 }]] },
+    "Detect Anomalies": { "main": [[{ "node": "Has Anomalies?", "type": "main", "index": 0 }]] },
+    "Has Anomalies?": { "main": [[{ "node": "Alert Anomaly", "type": "main", "index": 0 }], []] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Analytics" }, { "name": "Anomaly Detection" }, { "name": "Monitoring" }]
+}
