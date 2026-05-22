@@ -42,7 +42,15 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
   const handleLogout = () => {
     localStorage.removeItem("greevo_logged_in");
     localStorage.removeItem("greevo_api_key");
+    localStorage.removeItem("greevo_user");
     router.push("/login");
+  };
+
+  const getUserInitial = () => {
+    try {
+      const user = JSON.parse(localStorage.getItem("greevo_user") || "{}");
+      return (user.name || user.email || "U").charAt(0).toUpperCase();
+    } catch { return "U"; }
   };
 
   if (!ready) {
@@ -81,7 +89,7 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
               <span className="absolute top-1.5 right-1.5 w-[6px] h-[6px] bg-[#6C5CE7] rounded-full ring-2 ring-white dark:ring-[#1A1D26]" />
             </button>
             <button onClick={handleLogout} className="ml-1 w-8 h-8 rounded-full bg-gradient-to-br from-[#6C5CE7] to-[#A29BFE] flex items-center justify-center text-white text-[11px] font-bold" title="Logout">
-              A
+              {getUserInitial()}
             </button>
           </div>
         </header>

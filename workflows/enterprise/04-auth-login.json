@@ -1,0 +1,109 @@
+{
+  "name": "Enterprise - User Login Authentication",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "auth/login",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-login",
+      "name": "Login Endpoint",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "const input = $input.first().json;\nconst body = input.body || input;\n\nconst email = (body.email || '').trim().toLowerCase();\nconst password = body.password || '';\n\nif (!email || !password) {\n  return [{ json: { success: false, message: 'Email dan password wajib diisi' } }];\n}\n\nreturn [{ json: { email, password } }];"
+      },
+      "id": "validate-input",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [470, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT u.id, u.email, u.name, u.role, u.password_hash, u.client_id, u.is_active, c.company_name, c.api_key, c.plan_type FROM users u LEFT JOIN clients c ON c.id = u.client_id WHERE u.email = '{{ $json.email }}' AND u.is_active = true LIMIT 1",
+        "options": {}
+      },
+      "id": "find-user",
+      "name": "Find User",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [690, 300],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "functionCode": "const crypto = require('crypto');\nconst user = $input.first().json;\nconst loginData = $node['Validate Input'].json;\n\nif (!user.id) {\n  return [{ json: { success: false, message: 'Email atau password salah' } }];\n}\n\n// Verify password (SHA-256 hash comparison)\nconst inputHash = crypto.createHash('sha256').update(loginData.password + (user.email)).digest('hex');\n\nif (inputHash !== user.password_hash) {\n  return [{ json: { success: false, message: 'Email atau password salah' } }];\n}\n\n// Generate session token\nconst sessionToken = crypto.randomBytes(48).toString('hex');\n\nreturn [{ json: {\n  success: true,\n  authenticated: true,\n  user_id: user.id,\n  email: user.email,\n  name: user.name,\n  role: user.role,\n  company: user.company_name || '',\n  plan: user.plan_type || 'standard',\n  api_key: user.api_key,\n  token: sessionToken,\n  client_id: user.client_id\n}}];"
+      },
+      "id": "verify-password",
+      "name": "Verify Password",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [{ "value1": "={{ $json.success }}", "value2": true }]
+        }
+      },
+      "id": "is-authenticated",
+      "name": "Authenticated?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [1130, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO user_sessions (email, session_token, role, client_id, expires_at, is_active) VALUES ('{{ $json.email }}', '{{ $json.token }}', '{{ $json.role }}', {{ $json.client_id || 'NULL' }}, NOW() + INTERVAL '8 hours', true); UPDATE users SET last_login_at = NOW() WHERE email = '{{ $json.email }}'; SELECT log_audit({{ $json.client_id || 'NULL' }}, 'auth-login', 'user_login', 'auth', {{ $json.user_id }}, '{\"email\": \"{{ $json.email }}\", \"role\": \"{{ $json.role }}\"}'::jsonb, 'success')",
+        "options": {}
+      },
+      "id": "create-session",
+      "name": "Create Session & Log",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1350, 200],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, email: $json.email, name: $json.name, role: $json.role, company: $json.company, plan: $json.plan, api_key: $json.api_key, token: $json.token }) }}"
+      },
+      "id": "response-success",
+      "name": "Response: Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1570, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": { "responseCode": 401 }
+      },
+      "id": "response-fail",
+      "name": "Response: Failed",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1350, 400]
+    }
+  ],
+  "connections": {
+    "Login Endpoint": { "main": [[{ "node": "Validate Input", "type": "main", "index": 0 }]] },
+    "Validate Input": { "main": [[{ "node": "Find User", "type": "main", "index": 0 }]] },
+    "Find User": { "main": [[{ "node": "Verify Password", "type": "main", "index": 0 }]] },
+    "Verify Password": { "main": [[{ "node": "Authenticated?", "type": "main", "index": 0 }]] },
+    "Authenticated?": { "main": [[{ "node": "Create Session & Log", "type": "main", "index": 0 }], [{ "node": "Response: Failed", "type": "main", "index": 0 }]] },
+    "Create Session & Log": { "main": [[{ "node": "Response: Success", "type": "main", "index": 0 }]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Enterprise" }, { "name": "Auth" }, { "name": "Login" }]
+}
