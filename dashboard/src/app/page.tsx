@@ -24,6 +24,32 @@ const topKeywords = [
 ];
 
 export default function DashboardPage() {
+  const handleExport = () => {
+    const data = {
+      exported_at: new Date().toISOString(),
+      period: "Last 7 days",
+      kpi: {
+        new_leads: 47,
+        revenue_mtd: "Rp 450.000.000",
+        win_rate: "34%",
+        hot_leads: 18,
+      },
+      weekly_leads: weeklyLeads,
+      top_keywords: topKeywords,
+      recent_activity: recentActivity.map(a => ({ message: a.message, time: a.time })),
+    };
+
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `greevo-dashboard-${new Date().toISOString().split("T")[0]}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="space-y-7 animate-slide-up">
       {/* Header */}
@@ -34,7 +60,7 @@ export default function DashboardPage() {
         </div>
         <div className="flex gap-2">
           <button className="btn-secondary text-[12px]">Last 7 days</button>
-          <button className="btn-primary text-[12px]">Export</button>
+          <button onClick={handleExport} className="btn-primary text-[12px]">Export</button>
         </div>
       </div>
 
