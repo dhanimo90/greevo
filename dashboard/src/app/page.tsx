@@ -1,36 +1,18 @@
 "use client";
 import { KPICard } from "@/components/kpi-card";
-import { BarChart, DonutChart, SparkLine } from "@/components/chart-card";
 import { formatCurrency, formatNumber } from "@/lib/utils";
-
-const dashboardData = {
-  crm: { new_leads_7d: 47, total_customers: 234, hot_leads: 18, avg_lead_score: 42 },
-  sales: { active_deals: 23, pipeline_value: 1250000000, revenue_mtd: 450000000, revenue_growth_percent: 12, win_rate: 34 },
-  seo: { tracked_keywords: 156, top10_keywords: 42, top3_keywords: 11, total_backlinks: 892, new_backlinks_7d: 14 },
-  operations: { emails_sent_mtd: 12450, delivery_rate: 97.2, open_rate: 24.8, error_rate: 0.3 },
-};
 
 const weeklyLeads = [
   { label: "Mon", value: 8 }, { label: "Tue", value: 12 }, { label: "Wed", value: 6 },
   { label: "Thu", value: 15 }, { label: "Fri", value: 9 }, { label: "Sat", value: 3 }, { label: "Sun", value: 2 },
 ];
 
-const revenueSparkline = [120, 180, 150, 220, 280, 310, 290, 350, 380, 420, 450, 430];
-
-const pipelineStages = [
-  { label: "Prospect", value: 8, color: "bg-slate-400" },
-  { label: "Qualify", value: 5, color: "bg-blue-500" },
-  { label: "Proposal", value: 6, color: "bg-purple-500" },
-  { label: "Negotiate", value: 4, color: "bg-amber-500" },
-];
-
 const recentActivity = [
-  { message: "New lead: Budi Santoso from PT Maju", time: "2m", icon: "👤", color: "bg-blue-100" },
-  { message: "Deal 'Enterprise Co' moved to Negotiation", time: "15m", icon: "💰", color: "bg-green-100" },
-  { message: "Keyword 'crm terbaik' moved to #2", time: "1h", icon: "📈", color: "bg-purple-100" },
-  { message: "Welcome series sent to 12 contacts", time: "2h", icon: "📧", color: "bg-orange-100" },
-  { message: "Backlink lost from techblog.com (DR 52)", time: "3h", icon: "⚠️", color: "bg-red-100" },
-  { message: "A/B test winner: Variant B (+12% open rate)", time: "4h", icon: "🏆", color: "bg-yellow-100" },
+  { message: "New lead: Budi Santoso from PT Maju", time: "2m", icon: "👤", color: "bg-blue-50 dark:bg-blue-900/20" },
+  { message: "Deal 'Enterprise Co' moved to Negotiation", time: "15m", icon: "💰", color: "bg-emerald-50 dark:bg-emerald-900/20" },
+  { message: "Keyword 'crm terbaik' moved to #2", time: "1h", icon: "📈", color: "bg-purple-50 dark:bg-purple-900/20" },
+  { message: "Welcome series sent to 12 contacts", time: "2h", icon: "📧", color: "bg-orange-50 dark:bg-orange-900/20" },
+  { message: "A/B test winner: Variant B (+12% open rate)", time: "4h", icon: "🏆", color: "bg-yellow-50 dark:bg-yellow-900/20" },
 ];
 
 const topKeywords = [
@@ -42,84 +24,107 @@ const topKeywords = [
 ];
 
 export default function DashboardPage() {
-  const { crm, sales, seo, operations } = dashboardData;
-
   return (
-    <div className="space-y-8 animate-slide-up">
+    <div className="space-y-7 animate-slide-up">
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
           <h1 className="page-title">Dashboard</h1>
-          <p className="page-subtitle">Selamat pagi! Berikut overview performa bisnis Anda.</p>
+          <p className="page-subtitle">Overview performa bisnis Anda hari ini</p>
         </div>
         <div className="flex gap-2">
-          <button className="btn-secondary text-xs">Last 7 days</button>
-          <button className="btn-primary text-xs">Export PDF</button>
+          <button className="btn-secondary text-[12px]">Last 7 days</button>
+          <button className="btn-primary text-[12px]">Export</button>
         </div>
       </div>
 
-      {/* KPI Row 1 */}
+      {/* KPI Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <KPICard color="blue" icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/></svg>} title="New Leads (7d)" value={formatNumber(crm.new_leads_7d)} change={8} />
-        <KPICard color="green" icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>} title="Revenue MTD" value={formatCurrency(sales.revenue_mtd)} change={sales.revenue_growth_percent} />
-        <KPICard color="purple" icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>} title="Win Rate" value={`${sales.win_rate}%`} subtitle={`${sales.active_deals} active deals`} />
-        <KPICard color="orange" icon={<svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17.657 18.657A8 8 0 016.343 7.343S7 9 9 10c0-2 .5-5 2.986-7C14 5 16.09 5.777 17.656 7.343A7.975 7.975 0 0120 13a7.975 7.975 0 01-2.343 5.657z"/></svg>} title="Hot Leads" value={formatNumber(crm.hot_leads)} subtitle="Score ≥ 80" />
+        <KPICard icon="👥" title="New Leads (7d)" value={formatNumber(47)} change={8} iconBg="bg-blue-50 dark:bg-blue-900/20" />
+        <KPICard icon="💰" title="Revenue MTD" value={formatCurrency(450000000)} change={12} iconBg="bg-emerald-50 dark:bg-emerald-900/20" />
+        <KPICard icon="🎯" title="Win Rate" value="34%" subtitle="23 active deals" iconBg="bg-purple-50 dark:bg-purple-900/20" />
+        <KPICard icon="🔥" title="Hot Leads" value="18" subtitle="Score ≥ 80" iconBg="bg-orange-50 dark:bg-orange-900/20" />
       </div>
 
       {/* Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {/* Weekly Leads Chart */}
+        {/* Weekly Leads */}
         <div className="card card-body">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-200">Leads This Week</h3>
-            <span className="text-xs text-gray-400">Total: {weeklyLeads.reduce((s, d) => s + d.value, 0)}</span>
+          <div className="flex items-center justify-between mb-5">
+            <h3 className="text-[13px] font-semibold text-gray-700 dark:text-gray-200">Leads This Week</h3>
+            <span className="text-[11px] text-gray-400">Total: 55</span>
           </div>
-          <BarChart data={weeklyLeads.map(d => ({ ...d, color: "bg-brand-500" }))} height={140} />
-        </div>
-
-        {/* Revenue Trend */}
-        <div className="card card-body">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-200">Revenue Trend</h3>
-            <span className="text-xs text-emerald-600 font-medium">+12% vs last month</span>
-          </div>
-          <div className="flex items-center justify-center py-6">
-            <SparkLine data={revenueSparkline} color="text-emerald-500" />
-          </div>
-          <div className="flex justify-between text-xs text-gray-400 mt-2">
-            <span>12 months ago</span>
-            <span>Today</span>
+          <div className="flex items-end gap-[6px] h-[120px]">
+            {weeklyLeads.map((d, i) => (
+              <div key={i} className="flex flex-col items-center gap-1 flex-1">
+                <span className="text-[10px] text-gray-400 font-medium">{d.value}</span>
+                <div className="w-full rounded-md bg-[#6C5CE7]/80 hover:bg-[#6C5CE7] transition-colors" style={{ height: `${(d.value / 15) * 100}%`, minHeight: 4 }} />
+                <span className="text-[10px] text-gray-400">{d.label}</span>
+              </div>
+            ))}
           </div>
         </div>
 
-        {/* Pipeline Donut */}
+        {/* Pipeline Summary */}
         <div className="card card-body">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-200">Pipeline Health</h3>
-            <span className="text-xs text-gray-400">{formatCurrency(sales.pipeline_value)}</span>
+          <div className="flex items-center justify-between mb-5">
+            <h3 className="text-[13px] font-semibold text-gray-700 dark:text-gray-200">Pipeline</h3>
+            <span className="text-[11px] text-gray-400">{formatCurrency(1250000000)}</span>
           </div>
-          <div className="flex items-center justify-around py-2">
-            <DonutChart value={sales.active_deals} max={40} color="#3b82f6" label="Capacity" />
-            <DonutChart value={sales.win_rate} max={100} color="#10b981" label="Win Rate" />
-            <DonutChart value={operations.delivery_rate} max={100} color="#8b5cf6" label="Email DR" />
+          <div className="space-y-3">
+            {[
+              { stage: "Prospecting", count: 8, pct: 35, color: "bg-gray-300" },
+              { stage: "Qualification", count: 5, pct: 22, color: "bg-blue-400" },
+              { stage: "Proposal", count: 6, pct: 26, color: "bg-[#6C5CE7]" },
+              { stage: "Negotiation", count: 4, pct: 17, color: "bg-emerald-500" },
+            ].map((s) => (
+              <div key={s.stage} className="flex items-center gap-3">
+                <span className="text-[11px] text-gray-500 dark:text-gray-400 w-24 truncate">{s.stage}</span>
+                <div className="flex-1 h-2 bg-gray-100 dark:bg-gray-800 rounded-full overflow-hidden">
+                  <div className={`h-full rounded-full ${s.color}`} style={{ width: `${s.pct}%` }} />
+                </div>
+                <span className="text-[11px] font-medium text-gray-600 dark:text-gray-300 w-6 text-right">{s.count}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Quick Stats */}
+        <div className="card card-body">
+          <div className="flex items-center justify-between mb-5">
+            <h3 className="text-[13px] font-semibold text-gray-700 dark:text-gray-200">Email & SEO</h3>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            {[
+              { label: "Emails Sent", value: "12.4K", sub: "MTD" },
+              { label: "Open Rate", value: "24.8%", sub: "+3%" },
+              { label: "Top 10 KW", value: "42", sub: "/156" },
+              { label: "Backlinks", value: "892", sub: "+14" },
+            ].map((s) => (
+              <div key={s.label} className="text-center p-3 rounded-xl bg-[#F8F9FC] dark:bg-[#22252F]">
+                <p className="text-[16px] font-bold text-gray-900 dark:text-white">{s.value}</p>
+                <p className="text-[10px] text-gray-500 dark:text-gray-400 mt-0.5">{s.label}</p>
+                <p className="text-[10px] text-gray-400">{s.sub}</p>
+              </div>
+            ))}
           </div>
         </div>
       </div>
 
       {/* Bottom Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Recent Activity */}
+        {/* Activity */}
         <div className="card">
           <div className="card-header flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-gray-700">Recent Activity</h3>
-            <button className="text-xs text-brand-600 font-medium hover:text-brand-700">View all →</button>
+            <h3 className="text-[13px] font-semibold text-gray-700 dark:text-gray-200">Recent Activity</h3>
+            <button className="text-[11px] text-[#6C5CE7] font-medium hover:underline">View all</button>
           </div>
-          <div className="divide-y divide-gray-50 dark:divide-gray-800">
+          <div className="divide-y divide-[#E8ECF4] dark:divide-[#2A2D36]">
             {recentActivity.map((a, i) => (
-              <div key={i} className="px-6 py-3 flex items-center gap-3 hover:bg-gray-50/50 dark:hover:bg-gray-800/50 transition-colors">
+              <div key={i} className="px-6 py-3 flex items-center gap-3 hover:bg-[#F8F9FC] dark:hover:bg-[#22252F] transition-colors">
                 <div className={`w-8 h-8 rounded-lg ${a.color} flex items-center justify-center text-sm shrink-0`}>{a.icon}</div>
-                <p className="text-sm text-gray-600 dark:text-gray-300 flex-1 truncate">{a.message}</p>
-                <span className="text-xs text-gray-400 shrink-0">{a.time}</span>
+                <p className="text-[12px] text-gray-600 dark:text-gray-300 flex-1 truncate">{a.message}</p>
+                <span className="text-[11px] text-gray-400 shrink-0">{a.time}</span>
               </div>
             ))}
           </div>
@@ -128,18 +133,18 @@ export default function DashboardPage() {
         {/* Top Keywords */}
         <div className="card">
           <div className="card-header flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-gray-700">Top Keywords</h3>
-            <button className="text-xs text-brand-600 font-medium hover:text-brand-700">See all →</button>
+            <h3 className="text-[13px] font-semibold text-gray-700 dark:text-gray-200">Top Keywords</h3>
+            <button className="text-[11px] text-[#6C5CE7] font-medium hover:underline">See all</button>
           </div>
-          <div className="divide-y divide-gray-50 dark:divide-gray-800">
+          <div className="divide-y divide-[#E8ECF4] dark:divide-[#2A2D36]">
             {topKeywords.map((kw, i) => (
-              <div key={i} className="px-6 py-3 flex items-center justify-between hover:bg-gray-50/50 transition-colors">
+              <div key={i} className="px-6 py-3 flex items-center justify-between hover:bg-[#F8F9FC] dark:hover:bg-[#22252F] transition-colors">
                 <div className="flex items-center gap-3">
-                  <span className="w-6 h-6 rounded-md bg-brand-50 text-brand-600 flex items-center justify-center text-xs font-bold">#{kw.position}</span>
-                  <span className="text-sm text-gray-700 dark:text-gray-200 font-medium">{kw.keyword}</span>
+                  <span className="w-6 h-6 rounded-md bg-[#6C5CE7]/10 text-[#6C5CE7] flex items-center justify-center text-[10px] font-bold">#{kw.position}</span>
+                  <span className="text-[12px] text-gray-700 dark:text-gray-200 font-medium">{kw.keyword}</span>
                 </div>
-                <span className={`text-xs font-semibold ${kw.change > 0 ? "text-emerald-600" : kw.change < 0 ? "text-red-500" : "text-gray-400"}`}>
-                  {kw.change > 0 ? `▲ +${kw.change}` : kw.change < 0 ? `▼ ${kw.change}` : "—"}
+                <span className={`text-[11px] font-semibold ${kw.change > 0 ? "text-emerald-500" : kw.change < 0 ? "text-red-500" : "text-gray-400"}`}>
+                  {kw.change > 0 ? `↑ +${kw.change}` : kw.change < 0 ? `↓ ${kw.change}` : "—"}
                 </span>
               </div>
             ))}

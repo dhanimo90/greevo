@@ -18,15 +18,17 @@ export function Sidebar() {
   const pathname = usePathname();
 
   return (
-    <aside className="hidden lg:flex lg:flex-col lg:w-[260px] bg-gradient-to-b from-brand-950 to-brand-900 text-white min-h-screen">
-      <div className="flex items-center gap-3 h-16 px-6">
-        <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-400 to-brand-600 flex items-center justify-center shadow-lg shadow-brand-500/30">
+    <aside className="hidden lg:flex lg:flex-col lg:w-[250px] bg-[#1B1D2A] text-white min-h-screen border-r border-[#2A2D3A]">
+      {/* Logo */}
+      <div className="flex items-center gap-2.5 h-16 px-5">
+        <div className="w-8 h-8 rounded-lg bg-[#6C5CE7] flex items-center justify-center">
           <span className="text-white font-bold text-sm">G</span>
         </div>
-        <span className="text-lg font-bold tracking-tight">GreeVo</span>
+        <span className="text-[15px] font-bold tracking-tight">GreeVo</span>
       </div>
 
-      <nav className="flex-1 px-3 py-6 space-y-1">
+      {/* Nav */}
+      <nav className="flex-1 px-3 py-4 space-y-0.5">
         {navigation.map((item) => {
           const isActive = pathname === item.href;
           return (
@@ -34,28 +36,29 @@ export function Sidebar() {
               key={item.href}
               href={item.href}
               className={cn(
-                "flex items-center gap-3 px-4 py-2.5 rounded-xl text-sm font-medium transition-all duration-200",
+                "flex items-center gap-3 px-3 py-2.5 rounded-xl text-[13px] font-medium transition-all duration-150",
                 isActive
-                  ? "bg-white/15 text-white shadow-sm"
-                  : "text-white/60 hover:bg-white/10 hover:text-white/90"
+                  ? "bg-[#6C5CE7]/15 text-white"
+                  : "text-[#8B8FA3] hover:bg-white/5 hover:text-white"
               )}
             >
-              <span className="text-lg">{item.icon}</span>
+              <span className="text-base w-5 text-center">{item.icon}</span>
               <span>{item.name}</span>
-              {isActive && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-brand-400" />}
+              {isActive && <span className="ml-auto w-1.5 h-1.5 rounded-full bg-[#6C5CE7]" />}
             </Link>
           );
         })}
       </nav>
 
-      <div className="p-4 mx-3 mb-4 rounded-xl bg-white/5 border border-white/10">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 flex items-center justify-center text-xs font-bold text-white">
+      {/* User */}
+      <div className="p-3 mx-3 mb-4 rounded-xl bg-[#22252F] border border-[#2E3140]">
+        <div className="flex items-center gap-2.5">
+          <div className="w-8 h-8 rounded-full bg-gradient-to-br from-[#6C5CE7] to-[#A29BFE] flex items-center justify-center text-[11px] font-bold text-white">
             A
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-medium text-white/90 truncate">Admin User</p>
-            <p className="text-xs text-white/40">Enterprise Plan</p>
+            <p className="text-[12px] font-medium text-white/90 truncate">Admin User</p>
+            <p className="text-[11px] text-[#8B8FA3]">Enterprise</p>
           </div>
         </div>
       </div>

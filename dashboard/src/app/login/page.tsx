@@ -26,20 +26,20 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-brand-950 via-brand-900 to-brand-950 p-4">
-      <div className="w-full max-w-md">
+    <div className="min-h-screen flex items-center justify-center bg-[#1B1D2A] p-4">
+      <div className="w-full max-w-[400px]">
         <div className="text-center mb-8">
-          <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-brand-400 to-brand-600 flex items-center justify-center shadow-xl shadow-brand-500/30 mx-auto mb-4">
-            <span className="text-white font-bold text-2xl">G</span>
+          <div className="w-12 h-12 rounded-xl bg-[#6C5CE7] flex items-center justify-center mx-auto mb-4">
+            <span className="text-white font-bold text-xl">G</span>
           </div>
-          <h1 className="text-2xl font-bold text-white">Welcome to GreeVo</h1>
-          <p className="text-brand-200/60 mt-2 text-sm">Enterprise CRM, Marketing & SEO Platform</p>
+          <h1 className="text-xl font-bold text-white">Welcome to GreeVo</h1>
+          <p className="text-[#8B8FA3] mt-1.5 text-[13px]">Enterprise CRM, Marketing & SEO Platform</p>
         </div>
 
-        <form onSubmit={handleLogin} className="bg-white dark:bg-gray-900 rounded-2xl p-8 shadow-2xl">
+        <form onSubmit={handleLogin} className="bg-white dark:bg-[#22252F] rounded-2xl p-7 shadow-xl border border-[#E8ECF4] dark:border-[#2E3140]">
           <div className="space-y-5">
             <div>
-              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">API Key</label>
+              <label className="block text-[13px] font-medium text-gray-700 dark:text-gray-300 mb-2">API Key</label>
               <input
                 type="password"
                 value={apiKey}
@@ -48,27 +48,23 @@ export default function LoginPage() {
                 className="input-field"
                 required
               />
-              <p className="text-xs text-gray-400 mt-1.5">Enter your GreeVo API key to access the dashboard</p>
+              <p className="text-[11px] text-gray-400 mt-1.5">Enter your GreeVo API key to access the dashboard</p>
             </div>
 
             {error && (
-              <div className="bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 text-sm px-4 py-3 rounded-xl">
+              <div className="bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 text-[12px] px-4 py-3 rounded-xl">
                 {error}
               </div>
             )}
 
-            <button
-              type="submit"
-              disabled={loading || !apiKey}
-              className="w-full btn-primary py-3 text-base disabled:opacity-50"
-            >
+            <button type="submit" disabled={loading || !apiKey} className="w-full btn-primary py-3 disabled:opacity-50">
               {loading ? "Connecting..." : "Login"}
             </button>
           </div>
 
-          <div className="mt-6 pt-5 border-t border-gray-100 dark:border-gray-800">
-            <p className="text-xs text-gray-400 text-center">
-              Demo key: <code className="bg-gray-100 dark:bg-gray-800 px-2 py-0.5 rounded text-gray-600 dark:text-gray-300">gv_demo_key_12345</code>
+          <div className="mt-6 pt-5 border-t border-[#E8ECF4] dark:border-[#2E3140]">
+            <p className="text-[11px] text-gray-400 text-center">
+              Demo: <code className="bg-[#F8F9FC] dark:bg-[#1A1D26] px-2 py-0.5 rounded text-[#6C5CE7] font-mono">gv_demo_key_12345</code>
             </p>
           </div>
         </form>
