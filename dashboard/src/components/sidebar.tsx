@@ -9,8 +9,8 @@ const navigation = [
   { name: "Deals", href: "/deals", icon: "💰" },
   { name: "SEO", href: "/seo", icon: "🔍" },
   { name: "Marketing", href: "/marketing", icon: "📧" },
+  { name: "AI Agents", href: "/agents", icon: "🤖" },
   { name: "Reports", href: "/reports", icon: "📈" },
-  { name: "AI Assistant", href: "/ai", icon: "🤖" },
   { name: "Help", href: "/help", icon: "❓" },
   { name: "Settings", href: "/settings", icon: "⚙️" },
 ];
