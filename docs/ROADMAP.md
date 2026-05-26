@@ -213,16 +213,123 @@ Siap untuk deployment di perusahaan besar dengan compliance requirements.
 
 | Phase | Key Metric | Target |
 |-------|-----------|--------|
-| 1 | Workflows functional | 13/13 active |
-| 2 | Uptime | 99.5% |
-| 3 | Email engagement rate | >25% open rate |
-| 4 | SEO visibility score | +20% dalam 3 bulan |
-| 5 | Sales cycle reduction | -30% |
-| 6 | Report generation time | <5 menit (vs manual hours) |
-| 7 | Integration coverage | 10+ platforms |
-| 8 | Paying clients | 10+ |
-| 9 | AI accuracy | >80% recommendation acceptance |
-| 10 | Enterprise clients | 3+ |
+| 1 ✅ | Workflows functional | 13/13 active |
+| 2 ✅ | Uptime | 99.5% |
+| 3 ✅ | Email engagement rate | >25% open rate |
+| 4 ✅ | SEO visibility score | +20% dalam 3 bulan |
+| 5 ✅ | Sales cycle reduction | -30% |
+| 6 ✅ | Report generation time | <5 menit (vs manual hours) |
+| 7 ✅ | Integration coverage | 10+ platforms |
+| 8 ✅ | Paying clients | 10+ |
+| 9 ✅ | AI accuracy | >80% recommendation acceptance |
+| 10 ✅ | Enterprise clients | 3+ |
+| 11 | Security score | A+ (OWASP) |
+| 12 | Test coverage | >80% |
+| 13 | Client satisfaction | NPS >50 |
+
+---
+
+## Phase 11: Security Hardening (Minggu 25-26)
+> Keamanan production-grade
+
+### Deliverables
+- [ ] Password hashing upgrade (bcrypt/argon2 menggantikan SHA-256)
+- [ ] CSRF protection pada semua webhook endpoints
+- [ ] Input sanitization & SQL injection prevention di Code nodes
+- [ ] API rate limiting per IP (selain per client)
+- [ ] Webhook signature verification (HMAC)
+- [ ] Secrets encryption at rest (API keys di database)
+- [ ] Security headers audit (CSP, HSTS, X-Frame-Options)
+- [ ] Vulnerability scanning automation (dependency audit)
+- [ ] Brute-force login protection (lockout after 5 attempts)
+- [ ] Session management (force logout, max concurrent sessions)
+
+### Milestone: Security Certified
+Lulus security audit dan siap untuk client enterprise yang ketat.
+
+---
+
+## Phase 12: Testing & CI/CD (Minggu 27-28)
+> Quality assurance dan deployment automation
+
+### Deliverables
+- [ ] Unit tests untuk semua Code nodes (Jest)
+- [ ] Integration tests antar workflows (end-to-end)
+- [ ] API endpoint tests (Postman/Newman collection)
+- [ ] Load testing (k6/Artillery untuk webhook endpoints)
+- [ ] GitHub Actions CI pipeline (lint, test, build)
+- [ ] Automated deployment (push to main → deploy staging → promote production)
+- [ ] Database migration runner (versioned, rollback-able)
+- [ ] Seed data scripts untuk demo & testing
+- [ ] Smoke tests post-deployment
+- [ ] Code quality gates (coverage threshold, no critical vulnerabilities)
+
+### Milestone: Zero-Downtime Deployments
+Setiap perubahan di-test otomatis dan deploy tanpa downtime.
+
+---
+
+## Phase 13: Customer Experience & Growth (Minggu 29-32)
+> Fitur yang meningkatkan retention dan revenue
+
+### Deliverables
+- [ ] In-app notification center (bukan hanya Slack/email)
+- [ ] Email template builder (drag & drop visual editor)
+- [ ] Custom dashboard widgets (client pilih KPI yang ditampilkan)
+- [ ] Multi-language support (Bahasa Indonesia + English)
+- [ ] Referral program workflow (invite friend → get discount)
+- [ ] Trial-to-paid conversion automation (14-day trial flow)
+- [ ] NPS survey automation (quarterly, per client)
+- [ ] Usage-based billing tiers (pay per contact/email/keyword)
+- [ ] Client success health score (composite metric)
+- [ ] Changelog & feature announcement system (in-app)
+- [ ] Knowledge base / Help center (searchable docs)
+- [ ] Video onboarding tutorials (embedded Loom/YouTube)
+
+### Milestone: Best-in-Class UX
+Client love the product — NPS >50, churn <3%/month.
+
+---
+
+## Phase 14: Developer Platform & API (Minggu 33-36)
+> Buka ekosistem untuk developer pihak ketiga
+
+### Deliverables
+- [ ] Public REST API dengan OpenAPI/Swagger documentation
+- [ ] API versioning (v1, v2) dengan deprecation policy
+- [ ] Webhook event system (client subscribe ke events)
+- [ ] SDK: JavaScript/TypeScript client library
+- [ ] SDK: Python client library
+- [ ] CLI tool (greevo-cli: manage clients, import workflows, run migrations)
+- [ ] Developer portal (docs.greevo.id)
+- [ ] OAuth2 provider (third-party apps bisa integrate)
+- [ ] Marketplace: third-party workflow templates
+- [ ] Plugin system (custom nodes untuk n8n)
+
+### Milestone: Platform Ecosystem
+Developer bisa build di atas GreeVo — menjadi platform, bukan hanya product.
+
+---
+
+## Phase 15: Scale & Optimization (Ongoing)
+> Performance, cost optimization, dan global scale
+
+### Deliverables
+- [ ] Database read replicas (untuk reporting queries)
+- [ ] Redis caching layer (frequently accessed data)
+- [ ] CDN untuk dashboard static assets
+- [ ] Query optimization (slow query log → fix)
+- [ ] Workflow execution profiling (identify bottlenecks)
+- [ ] Cost optimization (right-size servers, reserved instances)
+- [ ] Multi-region active-active deployment
+- [ ] Database sharding strategy (per client atau per region)
+- [ ] Kubernetes migration (auto-scaling)
+- [ ] Observability stack (Grafana + Prometheus + Loki)
+- [ ] Disaster recovery drill (quarterly)
+- [ ] Capacity planning automation
+
+### Milestone: Global Scale
+Handle 1000+ clients, 99.99% uptime, sub-200ms API response.
 
 ---
 
@@ -238,6 +345,9 @@ Items yang perlu di-maintain sepanjang development:
 - [ ] Monitoring & alerting infrastructure
 - [ ] Disaster recovery procedures
 - [ ] Knowledge base & user guides
+- [ ] Dependency version upgrades (n8n, Next.js, PostgreSQL)
+- [ ] Technical debt review (monthly)
+- [ ] Architecture decision records (ADR)
 
 ---
 
@@ -248,5 +358,6 @@ Prioritas development bisa berubah berdasarkan:
 2. Market demand
 3. Technical dependencies
 4. Resource availability
+5. Security vulnerabilities (always priority 1)
 
 Review roadmap setiap 2 minggu di sprint planning.
