@@ -12,6 +12,7 @@ const navigation = [
   { name: "Marketing", href: "/marketing", icon: "📧" },
   { name: "Reports", href: "/reports", icon: "📈" },
   { name: "AI Assistant", href: "/ai", icon: "🤖" },
+  { name: "Help", href: "/help", icon: "❓" },
   { name: "Settings", href: "/settings", icon: "⚙️" },
 ];
 
