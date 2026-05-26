@@ -1,0 +1,96 @@
+{
+  "name": "Enterprise - Security Monitor & Brute-Force Protection",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": { "interval": [{ "field": "minutes", "minutesInterval": 5 }] }
+      },
+      "id": "every-5min",
+      "name": "Every 5 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT email, ip_address, COUNT(*) as attempts, MAX(attempted_at) as last_attempt FROM login_attempts WHERE success = false AND attempted_at > NOW() - INTERVAL '15 minutes' GROUP BY email, ip_address HAVING COUNT(*) >= 5 ORDER BY attempts DESC",
+        "options": {}
+      },
+      "id": "check-brute-force",
+      "name": "Check Brute Force",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 200],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT email, COUNT(*) as login_count, array_agg(DISTINCT ip_address) as ips FROM login_attempts WHERE success = true AND attempted_at > NOW() - INTERVAL '1 hour' GROUP BY email HAVING COUNT(DISTINCT ip_address) > 3",
+        "options": {}
+      },
+      "id": "check-suspicious",
+      "name": "Check Suspicious Logins",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [470, 400],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "functionCode": "const bruteForce = $node['Check Brute Force'].json;\nconst suspicious = $node['Check Suspicious Logins'].json;\n\nconst bfList = Array.isArray(bruteForce) ? bruteForce : (bruteForce?.email ? [bruteForce] : []);\nconst susList = Array.isArray(suspicious) ? suspicious : (suspicious?.email ? [suspicious] : []);\n\nconst alerts = [];\n\nfor (const bf of bfList) {\n  if (bf.email) alerts.push({ type: 'brute_force', severity: 'high', email: bf.email, ip: bf.ip_address, attempts: bf.attempts, message: `${bf.attempts} failed login attempts from ${bf.ip_address}` });\n}\n\nfor (const sus of susList) {\n  if (sus.email) alerts.push({ type: 'suspicious_login', severity: 'medium', email: sus.email, ips: sus.ips, message: `Login from ${sus.login_count} different IPs in 1 hour` });\n}\n\nreturn [{ json: { has_alerts: alerts.length > 0, alerts, checked_at: new Date().toISOString() } }];"
+      },
+      "id": "evaluate-threats",
+      "name": "Evaluate Threats",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300]
+    },
+    {
+      "parameters": {
+        "conditions": { "boolean": [{ "value1": "={{ $json.has_alerts }}", "value2": true }] }
+      },
+      "id": "has-threats",
+      "name": "Has Threats?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [910, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "{{ $json.alerts.filter(a => a.type === 'brute_force').map(a => `INSERT INTO security_events (event_type, user_email, ip_address, details, risk_level) VALUES ('brute_force_detected', '${a.email}', '${a.ip}', '{\"attempts\": ${a.attempts}}'::jsonb, 'high')`).join('; ') || 'SELECT 1' }}",
+        "options": {}
+      },
+      "id": "log-threats",
+      "name": "Log Security Events",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.3,
+      "position": [1130, 200],
+      "credentials": { "postgres": { "id": "postgres-cred", "name": "GreeVo PostgreSQL" } }
+    },
+    {
+      "parameters": {
+        "channel": "#security-alerts",
+        "text": "🚨 *Security Alert*\n\n{{ $json.alerts.map(a => `• [${a.severity.toUpperCase()}] ${a.type.replace(/_/g, ' ')}: ${a.message}\\n  Email: ${a.email}`).join('\\n\\n') }}\n\n_Investigate immediately. Accounts may be locked._",
+        "options": {}
+      },
+      "id": "alert-security",
+      "name": "Alert Security Team",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [1130, 400],
+      "credentials": { "slackApi": { "id": "slack-cred", "name": "Slack Bot" } }
+    }
+  ],
+  "connections": {
+    "Every 5 Minutes": { "main": [[{ "node": "Check Brute Force", "type": "main", "index": 0 }, { "node": "Check Suspicious Logins", "type": "main", "index": 0 }]] },
+    "Check Brute Force": { "main": [[{ "node": "Evaluate Threats", "type": "main", "index": 0 }]] },
+    "Check Suspicious Logins": { "main": [[{ "node": "Evaluate Threats", "type": "main", "index": 0 }]] },
+    "Evaluate Threats": { "main": [[{ "node": "Has Threats?", "type": "main", "index": 0 }]] },
+    "Has Threats?": { "main": [[{ "node": "Log Security Events", "type": "main", "index": 0 }, { "node": "Alert Security Team", "type": "main", "index": 0 }], []] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "tags": [{ "name": "Enterprise" }, { "name": "Security" }, { "name": "Monitoring" }]
+}

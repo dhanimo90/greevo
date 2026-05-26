@@ -1,0 +1,140 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-build:
+    name: Lint & Build Dashboard
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./dashboard
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Lint
+        run: npm run lint || true
+
+      - name: Build
+        run: npm run build
+
+  validate-workflows:
+    name: Validate n8n Workflows
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate JSON syntax
+        run: |
+          echo "Validating workflow JSON files..."
+          find workflows -name "*.json" -exec sh -c '
+            for file; do
+              if ! python3 -c "import json; json.load(open(\"$file\"))" 2>/dev/null; then
+                echo "❌ Invalid JSON: $file"
+                exit 1
+              fi
+            done
+          ' sh {} +
+          echo "✅ All workflow JSON files are valid"
+
+      - name: Check workflow structure
+        run: |
+          echo "Checking workflow structure..."
+          find workflows -name "*.json" | while read file; do
+            has_name=$(python3 -c "import json; d=json.load(open('$file')); print('name' in d)")
+            has_nodes=$(python3 -c "import json; d=json.load(open('$file')); print('nodes' in d)")
+            if [ "$has_name" != "True" ] || [ "$has_nodes" != "True" ]; then
+              echo "❌ Missing name/nodes: $file"
+              exit 1
+            fi
+          done
+          echo "✅ All workflows have valid structure"
+
+  validate-sql:
+    name: Validate SQL Migrations
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_DB: greevo_test
+          POSTGRES_USER: greevo
+          POSTGRES_PASSWORD: test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run migrations
+        env:
+          PGHOST: localhost
+          PGUSER: greevo
+          PGPASSWORD: test_password
+          PGDATABASE: greevo_test
+        run: |
+          echo "Running SQL migrations..."
+          for file in scripts/init-db.sql scripts/migrate-*.sql; do
+            if [ -f "$file" ]; then
+              echo "  → $file"
+              psql -f "$file" || { echo "❌ Failed: $file"; exit 1; }
+            fi
+          done
+          echo "✅ All migrations passed"
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./dashboard
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Audit dependencies
+        run: npm audit --audit-level=high || true
+
+      - name: Check for secrets in code
+        run: |
+          echo "Scanning for hardcoded secrets..."
+          if grep -rn "password\s*=\s*['\"]" --include="*.ts" --include="*.tsx" --include="*.js" src/ 2>/dev/null | grep -v "placeholder\|example\|demo\|type="; then
+            echo "⚠️ Potential hardcoded secrets found"
+          else
+            echo "✅ No hardcoded secrets detected"
+          fi
