@@ -1,141 +1,278 @@
 "use client";
+import { useState } from "react";
 
-interface AgentCard {
+type AgentCategory = "all" | "marketing" | "sales" | "seo" | "analytics" | "support";
+
+interface Agent {
   id: string;
   name: string;
   description: string;
+  category: AgentCategory;
   icon: string;
-  iconBg: string;
+  status: "active" | "inactive" | "coming_soon";
+  features: string[];
+  schedule?: string;
+  certified?: boolean;
 }
 
-interface HeroCard {
-  title: string;
-  gradient: string;
-}
-
-interface Section {
-  title: string;
-  hero: HeroCard;
-  featured: AgentCard;
-  agents: AgentCard[];
-  certified?: { title: string; description: string };
-}
-
-const sections: Section[] = [
+const agents: Agent[] = [
   {
-    title: "Marketing Automation",
-    hero: { title: "Campaigns – without manual work.", gradient: "from-purple-200 via-purple-100 to-indigo-100" },
-    featured: { id: "nurture", name: "Email Nurture Agent", description: "Auto-sends personalized nurture series based on lead behavior and funnel stage.", icon: "📧", iconBg: "bg-purple-100" },
-    agents: [
-      { id: "copywriter", name: "AI Copywriter", description: "Generates subject lines, email body, and social posts using AI.", icon: "✍️", iconBg: "bg-orange-100" },
-      { id: "ab-test", name: "A/B Testing Agent", description: "Splits audience, tests variants, and auto-sends the winner.", icon: "🧪", iconBg: "bg-pink-100" },
-    ],
-    certified: { title: "Custom agents built and maintained for you", description: "Let GreeVo experts map your marketing workflows and design bespoke agents." },
+    id: "lead-scorer",
+    name: "Lead Scoring Agent",
+    description: "Otomatis hitung dan update lead score berdasarkan aktivitas, profil, dan engagement pattern.",
+    category: "sales",
+    icon: "🎯",
+    status: "active",
+    features: ["Auto-recalculate setiap jam", "Decay score untuk inaktif", "Hot lead alert ke Slack"],
+    schedule: "Every hour",
+    certified: true,
   },
   {
-    title: "Sales & CRM",
-    hero: { title: "Close deals – on autopilot.", gradient: "from-emerald-200 via-emerald-100 to-teal-100" },
-    featured: { id: "pipeline", name: "Deal Pipeline Agent", description: "Auto-advances deals based on activity. Detects stale deals and alerts your team.", icon: "💰", iconBg: "bg-emerald-100" },
-    agents: [
-      { id: "lead-scorer", name: "Lead Scoring Agent", description: "Calculates and updates lead scores every hour based on engagement patterns.", icon: "🎯", iconBg: "bg-blue-100" },
-      { id: "assignment", name: "Lead Router", description: "Assigns qualified leads to the right sales rep by territory and specialty.", icon: "🔀", iconBg: "bg-indigo-100" },
-      { id: "forecast", name: "Sales Forecaster", description: "Weekly pipeline forecast with win probability and rep leaderboard.", icon: "📊", iconBg: "bg-violet-100" },
-    ],
+    id: "email-nurture",
+    name: "Email Nurture Agent",
+    description: "Kirim email nurture series otomatis berdasarkan stage dan behavior kontak.",
+    category: "marketing",
+    icon: "📧",
+    status: "active",
+    features: ["5-step nurture series", "Personalisasi dinamis", "Auto-stop jika converted"],
+    schedule: "Weekdays 9 AM",
+    certified: true,
   },
   {
-    title: "SEO & Content",
-    hero: { title: "Rank higher – effortlessly.", gradient: "from-blue-200 via-blue-100 to-cyan-100" },
-    featured: { id: "seo-monitor", name: "SEO Monitoring Agent", description: "Tracks keyword rankings, backlinks, and site health daily. Alerts on significant changes.", icon: "🔍", iconBg: "bg-blue-100" },
-    agents: [
-      { id: "competitor", name: "Competitor Intel", description: "Weekly competitor keyword scan and content gap analysis.", icon: "🕵️", iconBg: "bg-slate-100" },
-      { id: "cwv", name: "Core Web Vitals", description: "Monitors LCP, CLS, TBT via PageSpeed API. Alerts if poor.", icon: "⚡", iconBg: "bg-yellow-100" },
-      { id: "content-gap", name: "Content Gap Finder", description: "Identifies keywords competitors rank for but you don't.", icon: "📝", iconBg: "bg-teal-100" },
-    ],
+    id: "seo-monitor",
+    name: "SEO Monitoring Agent",
+    description: "Track keyword rankings, backlinks, dan site health setiap hari. Alert jika ada perubahan signifikan.",
+    category: "seo",
+    icon: "🔍",
+    status: "active",
+    features: ["Daily rank check", "Backlink new/lost detection", "Core Web Vitals monitoring"],
+    schedule: "Daily 6 AM",
+    certified: true,
   },
   {
-    title: "Analytics & Intelligence",
-    hero: { title: "Insights – delivered daily.", gradient: "from-rose-200 via-pink-100 to-orange-100" },
-    featured: { id: "dashboard-agent", name: "Daily Briefer", description: "Summarizes today's KPIs and flags anomalies for stakeholders.", icon: "📋", iconBg: "bg-rose-100" },
-    agents: [
-      { id: "churn", name: "Churn Predictor", description: "Predicts at-risk customers and recommends retention actions.", icon: "⚠️", iconBg: "bg-amber-100" },
-      { id: "segment", name: "Smart Segmentation", description: "Auto-clusters contacts into 6 behavior-based segments weekly.", icon: "🧠", iconBg: "bg-purple-100" },
-      { id: "attribution", name: "Attribution Modeler", description: "Calculates revenue attribution across all marketing channels.", icon: "🔗", iconBg: "bg-cyan-100" },
-    ],
+    id: "deal-pipeline",
+    name: "Deal Pipeline Agent",
+    description: "Auto-advance deals berdasarkan aktivitas. Detect stale deals dan alert sales team.",
+    category: "sales",
+    icon: "💰",
+    status: "active",
+    features: ["Auto stage advancement", "Stale deal detection", "Win probability update"],
+    schedule: "Every 2 hours",
   },
   {
-    title: "Support & Engagement",
-    hero: { title: "Always-on support.", gradient: "from-amber-200 via-yellow-100 to-orange-100" },
-    featured: { id: "chatbot", name: "Website Chatbot", description: "AI-powered chatbot that answers questions, detects intent, and creates leads automatically.", icon: "💬", iconBg: "bg-amber-100" },
-    agents: [
-      { id: "whatsapp", name: "WhatsApp Agent", description: "Handles inbound WhatsApp messages with auto-reply and human handoff.", icon: "📱", iconBg: "bg-green-100" },
-      { id: "telegram", name: "Telegram Bot", description: "Command-based bot for quick data access: /leads, /pipeline, /seo.", icon: "✈️", iconBg: "bg-blue-100" },
-      { id: "onboarding", name: "Customer Onboarding", description: "6-step automated onboarding sequence after deal is won.", icon: "🚀", iconBg: "bg-indigo-100" },
-    ],
+    id: "ai-copywriter",
+    name: "AI Copywriter Agent",
+    description: "Generate email subject lines, body copy, dan social media posts menggunakan AI.",
+    category: "marketing",
+    icon: "✍️",
+    status: "active",
+    features: ["Subject line generator", "Email body writer", "Tone customization per client"],
+    certified: true,
+  },
+  {
+    id: "churn-predictor",
+    name: "Churn Prediction Agent",
+    description: "Prediksi customer yang berisiko churn berdasarkan engagement patterns. Recommend actions.",
+    category: "analytics",
+    icon: "⚠️",
+    status: "active",
+    features: ["Weekly risk scoring", "Activity decline detection", "Auto re-engagement trigger"],
+    schedule: "Weekly Monday",
+  },
+  {
+    id: "competitor-spy",
+    name: "Competitor Intelligence Agent",
+    description: "Monitor keyword rankings kompetitor, identifikasi content gaps, dan peluang baru.",
+    category: "seo",
+    icon: "🕵️",
+    status: "active",
+    features: ["Weekly competitor scan", "Content gap analysis", "SERP feature tracking"],
+    schedule: "Weekly Monday",
+  },
+  {
+    id: "chatbot",
+    name: "Website Chatbot Agent",
+    description: "AI chatbot untuk website. Jawab pertanyaan visitor, detect intent, auto-create lead.",
+    category: "support",
+    icon: "💬",
+    status: "active",
+    features: ["Natural language AI", "Intent detection", "Auto lead creation", "Human handoff"],
+    certified: true,
+  },
+  {
+    id: "report-generator",
+    name: "Report Generator Agent",
+    description: "Generate dan kirim laporan otomatis (SEO weekly, marketing monthly, sales forecast).",
+    category: "analytics",
+    icon: "📊",
+    status: "active",
+    features: ["Weekly SEO report", "Monthly marketing report", "Sales forecast", "Executive dashboard"],
+    schedule: "Scheduled",
+  },
+  {
+    id: "social-poster",
+    name: "Social Media Agent",
+    description: "Auto-post ke LinkedIn, Twitter/X, Facebook pada jadwal optimal.",
+    category: "marketing",
+    icon: "📱",
+    status: "active",
+    features: ["Multi-platform posting", "Scheduled posts", "Hashtag optimization"],
+    schedule: "3x daily weekdays",
+  },
+  {
+    id: "ab-tester",
+    name: "A/B Testing Agent",
+    description: "Jalankan A/B test otomatis, determine winner, dan kirim ke remaining audience.",
+    category: "marketing",
+    icon: "🧪",
+    status: "active",
+    features: ["Auto split audience", "Statistical significance check", "Auto-send winner"],
+    schedule: "On-demand",
+  },
+  {
+    id: "smart-segment",
+    name: "Smart Segmentation Agent",
+    description: "Auto-cluster kontak ke segments berdasarkan behavior dan engagement patterns.",
+    category: "analytics",
+    icon: "🧠",
+    status: "active",
+    features: ["6 auto-segments", "Weekly re-clustering", "Auto-tagging"],
+    schedule: "Weekly Sunday",
+  },
+  {
+    id: "invoice-agent",
+    name: "Invoice & Payment Agent",
+    description: "Generate invoice otomatis, track payment, kirim reminder untuk overdue.",
+    category: "sales",
+    icon: "🧾",
+    status: "coming_soon",
+    features: ["Auto invoice generation", "Payment tracking", "Overdue reminders"],
+  },
+  {
+    id: "review-manager",
+    name: "Review & Reputation Agent",
+    description: "Monitor online reviews, respond otomatis, dan alert untuk review negatif.",
+    category: "support",
+    icon: "⭐",
+    status: "coming_soon",
+    features: ["Google review monitoring", "Auto-response templates", "Sentiment analysis"],
   },
 ];
 
+const categories: { key: AgentCategory; label: string }[] = [
+  { key: "all", label: "All Agents" },
+  { key: "marketing", label: "Marketing" },
+  { key: "sales", label: "Sales" },
+  { key: "seo", label: "SEO" },
+  { key: "analytics", label: "Analytics" },
+  { key: "support", label: "Support" },
+];
+
 export default function AgentsPage() {
+  const [activeCategory, setActiveCategory] = useState<AgentCategory>("all");
+  const [search, setSearch] = useState("");
+
+  const filtered = agents.filter((a) => {
+    const matchCategory = activeCategory === "all" || a.category === activeCategory;
+    const matchSearch = !search || a.name.toLowerCase().includes(search.toLowerCase()) || a.description.toLowerCase().includes(search.toLowerCase());
+    return matchCategory && matchSearch;
+  });
+
+  const activeCount = agents.filter(a => a.status === "active").length;
+
   return (
-    <div className="space-y-10">
+    <div className="space-y-6">
       {/* Header */}
-      <div>
-        <h1 className="page-title">AI Agents</h1>
-        <p className="page-subtitle">Automasi bisnis Anda 24/7 dengan AI agents yang bekerja tanpa henti</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="page-title">AI Agents</h1>
+          <p className="page-subtitle">{activeCount} agents active · Automasi bisnis Anda 24/7</p>
+        </div>
       </div>
 
-      {/* Sections */}
-      {sections.map((section) => (
-        <div key={section.title} className="space-y-4">
-          <h2 className="text-[15px] font-semibold text-gray-800 dark:text-white">{section.title}</h2>
-
-          {/* Top row: Hero + Featured */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            {/* Hero banner */}
-            <div className={`lg:col-span-2 rounded-2xl bg-gradient-to-r ${section.hero.gradient} p-8 flex items-center min-h-[140px]`}>
-              <h3 className="text-[20px] font-bold text-gray-800 leading-tight max-w-[280px]">{section.hero.title}</h3>
-            </div>
-
-            {/* Featured agent */}
-            <div className="card card-body flex flex-col justify-between">
-              <div>
-                <div className={`w-9 h-9 rounded-xl ${section.featured.iconBg} flex items-center justify-center text-lg mb-3`}>
-                  {section.featured.icon}
-                </div>
-                <h4 className="text-[13px] font-semibold text-gray-800 dark:text-white">{section.featured.name}</h4>
-                <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-1 leading-relaxed">{section.featured.description}</p>
-              </div>
-              <div className="flex items-center gap-1.5 mt-3">
-                <span className="w-2 h-2 rounded-full bg-emerald-500" />
-                <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-medium">Active</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Bottom row: Agent cards + Certified */}
-          <div className={`grid grid-cols-1 md:grid-cols-2 ${section.certified ? "lg:grid-cols-3" : `lg:grid-cols-${section.agents.length}`} gap-4`}>
-            {section.agents.map((agent) => (
-              <div key={agent.id} className="card card-body">
-                <div className={`w-9 h-9 rounded-xl ${agent.iconBg} flex items-center justify-center text-lg mb-3`}>
-                  {agent.icon}
-                </div>
-                <h4 className="text-[13px] font-semibold text-gray-800 dark:text-white">{agent.name}</h4>
-                <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-1 leading-relaxed">{agent.description}</p>
-              </div>
-            ))}
-
-            {/* Certified card */}
-            {section.certified && (
-              <div className="card card-body bg-gradient-to-br from-[#F8F9FC] to-white dark:from-[#22252F] dark:to-[#1A1D26] border-[#6C5CE7]/20">
-                <div className="flex items-center justify-between mb-2">
-                  <h4 className="text-[13px] font-semibold text-gray-800 dark:text-white">{section.certified.title}</h4>
-                  <span className="badge bg-[#6C5CE7]/10 text-[#6C5CE7] text-[10px]">✓ Certified</span>
-                </div>
-                <p className="text-[11px] text-gray-500 dark:text-gray-400 leading-relaxed">{section.certified.description}</p>
-              </div>
-            )}
-          </div>
+      {/* Search + Categories */}
+      <div className="space-y-4">
+        <input
+          type="text"
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search agents..."
+          className="input-field max-w-md"
+        />
+        <div className="flex gap-2 flex-wrap">
+          {categories.map((cat) => (
+            <button
+              key={cat.key}
+              onClick={() => setActiveCategory(cat.key)}
+              className={`px-4 py-2 rounded-xl text-[12px] font-medium transition-all ${
+                activeCategory === cat.key
+                  ? "bg-[#6C5CE7] text-white shadow-sm"
+                  : "bg-white dark:bg-[#1A1D26] border border-[#E8ECF4] dark:border-[#2A2D36] text-gray-600 dark:text-gray-300 hover:border-[#6C5CE7]/30"
+              }`}
+            >
+              {cat.label}
+            </button>
+          ))}
         </div>
-      ))}
+      </div>
+
+      {/* Agent Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {filtered.map((agent) => (
+          <div key={agent.id} className={`card card-body relative group ${agent.status === "coming_soon" ? "opacity-60" : ""}`}>
+            {/* Status badge */}
+            <div className="absolute top-4 right-4">
+              {agent.certified && (
+                <span className="badge bg-emerald-50 text-emerald-700 dark:bg-emerald-900/20 dark:text-emerald-400 text-[10px]">✓ Certified</span>
+              )}
+              {agent.status === "coming_soon" && (
+                <span className="badge bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400 text-[10px]">Coming Soon</span>
+              )}
+            </div>
+
+            {/* Icon + Name */}
+            <div className="flex items-start gap-3 mb-3">
+              <div className="w-10 h-10 rounded-xl bg-[#F8F9FC] dark:bg-[#22252F] flex items-center justify-center text-xl shrink-0">
+                {agent.icon}
+              </div>
+              <div>
+                <h3 className="text-[13px] font-semibold text-gray-800 dark:text-white">{agent.name}</h3>
+                <p className="text-[11px] text-gray-500 dark:text-gray-400 mt-0.5 capitalize">{agent.category}</p>
+              </div>
+            </div>
+
+            {/* Description */}
+            <p className="text-[12px] text-gray-600 dark:text-gray-300 leading-relaxed mb-3">{agent.description}</p>
+
+            {/* Features */}
+            <div className="space-y-1.5 mb-4">
+              {agent.features.map((f, i) => (
+                <div key={i} className="flex items-center gap-2 text-[11px] text-gray-500 dark:text-gray-400">
+                  <span className="w-1 h-1 rounded-full bg-[#6C5CE7]" />
+                  {f}
+                </div>
+              ))}
+            </div>
+
+            {/* Footer */}
+            <div className="flex items-center justify-between pt-3 border-t border-[#E8ECF4] dark:border-[#2A2D36]">
+              {agent.schedule && (
+                <span className="text-[10px] text-gray-400">⏰ {agent.schedule}</span>
+              )}
+              {agent.status === "active" ? (
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                  <span className="text-[11px] text-emerald-600 dark:text-emerald-400 font-medium">Active</span>
+                </div>
+              ) : agent.status === "coming_soon" ? (
+                <button className="text-[11px] text-[#6C5CE7] font-medium" disabled>Coming Soon</button>
+              ) : (
+                <button className="text-[11px] text-[#6C5CE7] font-medium hover:underline">Activate</button>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
